@@ -17,7 +17,6 @@ Singleton {
                     "text": action.text
                 })) ?? []
         property bool popup: false
-        // Capturar valores inmediatamente para evitar binding issues
         property string appIcon: ""
         property string appName: ""
         property string body: ""
@@ -27,14 +26,11 @@ Singleton {
         property string urgency: "normal"
         property Timer timer
 
-        // Propiedades para cache de imágenes
         property string cachedAppIcon: ""
         property string cachedImage: ""
 
-        // Indica si esta notificación fue cargada desde cache
         property bool isCached: false
 
-        // Inicializar valores cuando se asigna la notification
         onNotificationChanged: {
             if (notification) {
                 appIcon = notification.appIcon ?? "";
@@ -44,7 +40,6 @@ Singleton {
                 summary = notification.summary ?? "";
                 urgency = notification.urgency.toString() ?? "normal";
 
-                // Cachear imágenes
                 if (appIcon && !appIcon.startsWith("data:")) {
                     root.cacheImageAsBase64(appIcon, function (cachedData) {
                         cachedAppIcon = cachedData;
@@ -56,9 +51,7 @@ Singleton {
                     });
                 }
 
-                // Escuchar cuando la notificación es cerrada por la aplicación
                 notification.closed.connect(function (reason) {
-                    // CloseRequested = 3: la aplicación solicitó cerrar la notificación
                     if (reason === 3) {
                         root.discardNotification(id);
                     }
@@ -101,7 +94,6 @@ Singleton {
             target: SuspendManager
             function onWakingUp() {
                 if (!isPaused) {
-                    // Small delay after wake to prevent popups appearing while screen is still transitioning
                     wakeStartTimer.restart();
                 }
             }
@@ -136,7 +128,7 @@ Singleton {
     property var popupList: list.filter(notif => notif.popup)
     property bool popupInhibited: silent
     property var latestTimeForApp: ({})
-    property var totalCounts: ({})  // Conteo total independiente del almacenamiento: {appName: {summary: count}}
+    property var totalCounts: ({})
 
     Component {
         id: notifComponent
@@ -147,10 +139,38 @@ Singleton {
         NotifTimer {}
     }
 
+    property bool creatingNotificationsFile: false
+
     FileView {
         id: notifFileView
         path: Quickshell.cachePath("notifications.json")
+
         onLoaded: loadNotifications()
+
+        onLoadFailed: error => {
+            if (root.creatingNotificationsFile)
+                return;
+
+            console.log("notifications.json does not exist or could not be loaded; creating it:", error);
+
+            root.creatingNotificationsFile = true;
+            root.list = [];
+            root.idOffset = 0;
+
+            notifFileView.setText("[]");
+        }
+
+        onSaved: {
+            if (root.creatingNotificationsFile) {
+                root.creatingNotificationsFile = false;
+                notifFileView.reload();
+            }
+        }
+
+        onSaveFailed: error => {
+            root.creatingNotificationsFile = false;
+            console.log("Failed to create notifications.json:", error);
+        }
     }
 
     function stringifyList(list) {
@@ -161,25 +181,21 @@ Singleton {
         return notifComponent.createObject(root, {
             "id": json.id,
             "actions": json.actions,
-            "appIcon": json.cachedAppIcon || json.appIcon  // Usar cached si disponible
-            ,
+            "appIcon": json.cachedAppIcon || json.appIcon,
             "appName": json.appName,
             "body": json.body,
-            "image": json.cachedImage || json.image  // Usar cached si disponible
-            ,
+            "image": json.cachedImage || json.image,
             "summary": json.summary,
             "time": json.time,
             "urgency": json.urgency,
             "cachedAppIcon": json.cachedAppIcon || "",
             "cachedImage": json.cachedImage || "",
-            "isCached": json.isCached || true  // Default to true for loaded notifications
-            ,
-            "popup": false  // No popup para notificaciones cargadas
+            "isCached": json.isCached || true,
+            "popup": false
         });
     }
 
     function saveNotifications() {
-        // Limitar notificaciones almacenadas a 5 por summary para evitar almacenamiento excesivo
         const limitedList = limitNotificationsPerSummary(root.list);
         notifFileView.setText(stringifyList(limitedList));
     }
@@ -224,13 +240,11 @@ Singleton {
     }
 
     onListChanged: {
-        // Update latest time for each app
         root.list.forEach(notif => {
             if (!root.latestTimeForApp[notif.appName] || notif.time > root.latestTimeForApp[notif.appName]) {
                 root.latestTimeForApp[notif.appName] = Math.max(root.latestTimeForApp[notif.appName] || 0, notif.time);
             }
         });
-        // Remove apps that no longer have notifications
         Object.keys(root.latestTimeForApp).forEach(appName => {
             if (!root.list.some(notif => notif.appName === appName)) {
                 delete root.latestTimeForApp[appName];
@@ -240,7 +254,6 @@ Singleton {
 
     function appNameListForGroups(groups) {
         return Object.keys(groups).sort((a, b) => {
-            // Sort by time, descending
             return groups[b].time - groups[a].time;
         });
     }
@@ -248,7 +261,6 @@ Singleton {
     function groupsForList(list) {
         const groups = {};
         list.forEach((notif, index) => {
-            // Verificar que la notificación es válida antes de agruparla
             if (!notif || !notif.appName || (!notif.summary && !notif.body)) {
                 return;
             }
@@ -259,12 +271,11 @@ Singleton {
                     appIcon: notif.appIcon,
                     notifications: [],
                     time: 0,
-                    totalCount: 0  // Conteo independiente del almacenamiento
+                    totalCount: 0
                 };
             }
             groups[notif.appName].notifications.push(notif);
             groups[notif.appName].totalCount++;
-            // Always set to the latest time in the group
             groups[notif.appName].time = latestTimeForApp[notif.appName] || notif.time;
         });
 
@@ -276,8 +287,6 @@ Singleton {
     property var appNameList: appNameListForGroups(root.groupsByAppName)
     property var popupAppNameList: appNameListForGroups(root.popupGroupsByAppName)
 
-    // Quickshell's notification IDs starts at 1 on each run, while saved notifications
-    // can already contain higher IDs. This is for avoiding id collisions
     property int idOffset
     signal initDone
     signal notify(notification: var)
@@ -297,7 +306,6 @@ Singleton {
         persistenceSupported: true
 
         onNotification: notification => {
-            // Verificar que la notificación tiene contenido válido antes de procesarla
             if (!notification || (!notification.summary && !notification.body)) {
                 return;
             }
@@ -309,18 +317,16 @@ Singleton {
                 "time": Date.now()
             });
 
-            // Usar Qt.callLater para evitar race conditions al actualizar la lista
             Qt.callLater(() => {
                 root.list = [...root.list, newNotifObject];
                 saveNotifications();
             });
 
-            // Popup - ahora se muestra en el notch en lugar de popup window
             if (!root.popupInhibited) {
                 newNotifObject.popup = true;
                 newNotifObject.timer = notifTimerComponent.createObject(root, {
                     "id": newNotifObject.id,
-                    "interval": notification.expireTimeout < 0 ? 5000 : notification.expireTimeout // Aumentado para notch
+                    "interval": notification.expireTimeout < 0 ? 5000 : notification.expireTimeout
                 });
             }
 
