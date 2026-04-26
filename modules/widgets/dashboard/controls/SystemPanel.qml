@@ -7,6 +7,7 @@ import qs.modules.theme
 import qs.modules.components
 import qs.modules.globals
 import qs.modules.config
+import qs.modules.services as Services
 
 Item {
     id: root
@@ -16,6 +17,19 @@ Item {
     readonly property real sideMargin: (width - contentWidth) / 2
 
     property string currentSection: ""
+
+    function sectionTitle(section) {
+        if (section === "")
+            return "System";
+
+        if (section === "system")
+            return "System Resources";
+
+        if (section === "nightLight")
+            return "Night Light";
+
+        return section.charAt(0).toUpperCase() + section.slice(1);
+    }
 
     component SectionButton: StyledRect {
         id: sectionBtn
@@ -83,7 +97,8 @@ Item {
                     id: titlebar
                     width: root.contentWidth
                     anchors.horizontalCenter: parent.horizontalCenter
-                    title: root.currentSection === "" ? "System" : (root.currentSection === "system" ? "System Resources" : (root.currentSection.charAt(0).toUpperCase() + root.currentSection.slice(1)))
+                    title: root.sectionTitle(root.currentSection)
+                    // title: root.currentSection === "" ? "System" : (root.currentSection === "system" ? "System Resources" : (root.currentSection.charAt(0).toUpperCase() + root.currentSection.slice(1)))
                     statusText: ""
 
                     actions: {
@@ -141,6 +156,10 @@ Item {
                         SectionButton {
                             text: "Idle"
                             sectionId: "idle"
+                        }
+                        SectionButton {
+                            text: "Night Light"
+                            sectionId: "nightLight"
                         }
                     }
 
@@ -792,6 +811,372 @@ Item {
                                     Config.system.idle.listeners = list;
                                     GlobalStates.markShellChanged();
                                 }
+                            }
+                        }
+                    }
+
+                    // =====================
+                    // NIGHT LIGHT SECTION
+                    // =====================
+                    ColumnLayout {
+                        visible: root.currentSection === "nightLight"
+                        property string settingsSection: "nightLight"
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Text {
+                            text: "Night Light"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(-1)
+                            font.weight: Font.Medium
+                            color: Colors.overSurfaceVariant
+                            Layout.bottomMargin: -4
+                        }
+
+                        Text {
+                            text: "Configure wlsunset behavior"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(-2)
+                            color: Colors.overSurfaceVariant
+                            opacity: 0.7
+                        }
+
+                        ToggleRow {
+                            Layout.fillWidth: true
+                            label: "Enabled"
+                            description: "Start or stop the Night Light service"
+                            checked: Services.NightLightService.active
+                            onToggled: checked => {
+                                Services.NightLightService.active = checked;
+                            }
+                        }
+
+                        Text {
+                            text: "Mode"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(0)
+                            color: Colors.overBackground
+                            Layout.topMargin: 8
+                        }
+
+                        Row {
+                            spacing: 8
+
+                            Repeater {
+                                model: [
+                                    {
+                                        id: "always",
+                                        label: "Always On"
+                                    },
+                                    {
+                                        id: "location",
+                                        label: "Location Based"
+                                    }
+                                ]
+
+                                delegate: StyledRect {
+                                    id: modeButton
+
+                                    required property var modelData
+                                    required property int index
+
+                                    property bool isSelected: Config.nightLight.mode === modelData.id
+                                    property bool isHovered: false
+
+                                    variant: isSelected ? "primary" : (isHovered ? "focus" : "common")
+                                    width: modeLabel.width + 24
+                                    height: 36
+                                    radius: Styling.radius(-2)
+
+                                    Text {
+                                        id: modeLabel
+                                        anchors.centerIn: parent
+                                        text: modeButton.modelData.label
+                                        font.family: Config.theme.font
+                                        font.pixelSize: Styling.fontSize(0)
+                                        font.weight: modeButton.isSelected ? Font.Bold : Font.Normal
+                                        color: modeButton.item
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onEntered: modeButton.isHovered = true
+                                        onExited: modeButton.isHovered = false
+                                        onClicked: {
+                                            Config.nightLight.mode = modeButton.modelData.id;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: Config.nightLight.mode === "location"
+                                ? "Uses latitude and longitude to calculate sunrise and sunset."
+                                : "Forces a warm Night Light temperature whenever enabled."
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(-2)
+                            color: Colors.overSurfaceVariant
+                            opacity: 0.7
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+
+                        component RealInputRow: RowLayout {
+                            id: realInputRowRoot
+
+                            property string label: ""
+                            property real value: 0.0
+                            property real minValue: -999999
+                            property real maxValue: 999999
+                            property int decimals: 4
+                            property string suffix: ""
+
+                            signal valueEdited(real newValue)
+
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: realInputRowRoot.label
+                                font.family: Config.theme.font
+                                font.pixelSize: Styling.fontSize(0)
+                                color: Colors.overBackground
+                                Layout.fillWidth: true
+                            }
+
+                            StyledRect {
+                                variant: "common"
+                                Layout.preferredWidth: 110
+                                Layout.preferredHeight: 32
+                                radius: Styling.radius(-2)
+
+                                TextInput {
+                                    id: realTextInput
+                                    anchors.fill: parent
+                                    anchors.margins: 8
+                                    font.family: Config.theme.monoFont
+                                    font.pixelSize: Styling.monoFontSize(0)
+                                    color: Colors.overBackground
+                                    selectByMouse: true
+                                    clip: true
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    horizontalAlignment: TextInput.AlignHCenter
+
+                                    validator: DoubleValidator {
+                                        bottom: realInputRowRoot.minValue
+                                        top: realInputRowRoot.maxValue
+                                        decimals: realInputRowRoot.decimals
+                                        notation: DoubleValidator.StandardNotation
+                                    }
+
+                                    readonly property real configValue: realInputRowRoot.value
+
+                                    onConfigValueChanged: {
+                                        if (!activeFocus && text !== configValue.toString()) {
+                                            text = configValue.toString();
+                                        }
+                                    }
+
+                                    Component.onCompleted: text = configValue.toString()
+
+                                    onEditingFinished: {
+                                        let newVal = parseFloat(text);
+
+                                        if (!isNaN(newVal)) {
+                                            newVal = Math.max(realInputRowRoot.minValue, Math.min(realInputRowRoot.maxValue, newVal));
+                                            realInputRowRoot.valueEdited(newVal);
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: realInputRowRoot.suffix
+                                font.family: Config.theme.font
+                                font.pixelSize: Styling.fontSize(0)
+                                color: Colors.overSurfaceVariant
+                                visible: suffix !== ""
+                            }
+                        }
+
+                        NumberInputRow {
+                            Layout.fillWidth: true
+                            label: "Night Temp"
+                            value: Config.nightLight.nightTemperature
+                            minValue: 1000
+                            maxValue: 10000
+                            suffix: "K"
+                            onValueEdited: newValue => {
+                                Config.nightLight.nightTemperature = newValue;
+
+                                if (Config.nightLight.dayTemperature <= newValue) {
+                                    Config.nightLight.dayTemperature = newValue + 1;
+                                }
+                            }
+                        }
+
+                        NumberInputRow {
+                            Layout.fillWidth: true
+                            label: "Day Temp"
+                            visible: Config.nightLight.mode === "location"
+                            value: Config.nightLight.dayTemperature
+                            minValue: 1001
+                            maxValue: 10000
+                            suffix: "K"
+                            onValueEdited: newValue => {
+                                Config.nightLight.dayTemperature = Math.max(newValue, Config.nightLight.nightTemperature + 1);
+                            }
+                        }
+
+                        NumberInputRow {
+                            Layout.fillWidth: true
+                            label: "High Offset"
+                            visible: Config.nightLight.mode === "always"
+                            value: Config.nightLight.highTemperatureOffset
+                            minValue: 1
+                            maxValue: 1000
+                            suffix: "K"
+                            onValueEdited: newValue => {
+                                Config.nightLight.highTemperatureOffset = newValue;
+                            }
+                        }
+
+                        NumberInputRow {
+                            Layout.fillWidth: true
+                            label: "Transition"
+                            value: Config.nightLight.transitionDuration
+                            minValue: 0
+                            maxValue: 3600
+                            suffix: "s"
+                            onValueEdited: newValue => {
+                                Config.nightLight.transitionDuration = newValue;
+                            }
+                        }
+
+                        Text {
+                            visible: Config.nightLight.mode === "location"
+                            text: "Location"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(0)
+                            color: Colors.overBackground
+                            Layout.topMargin: 8
+                        }
+
+                        RealInputRow {
+                            Layout.fillWidth: true
+                            visible: Config.nightLight.mode === "location"
+                            label: "Latitude"
+                            value: Config.nightLight.latitude
+                            minValue: -90
+                            maxValue: 90
+                            decimals: 6
+                            onValueEdited: newValue => {
+                                Config.nightLight.latitude = newValue;
+                            }
+                        }
+
+                        RealInputRow {
+                            Layout.fillWidth: true
+                            visible: Config.nightLight.mode === "location"
+                            label: "Longitude"
+                            value: Config.nightLight.longitude
+                            minValue: -180
+                            maxValue: 180
+                            decimals: 6
+                            onValueEdited: newValue => {
+                                Config.nightLight.longitude = newValue;
+                            }
+                        }
+
+                        Text {
+                            visible: Config.nightLight.mode === "always"
+                            text: "Forced Mode Schedule"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(0)
+                            color: Colors.overBackground
+                            Layout.topMargin: 8
+                        }
+
+                        TextInputRow {
+                            Layout.fillWidth: true
+                            visible: Config.nightLight.mode === "always"
+                            label: "Sunset"
+                            value: Config.nightLight.forcedSunsetTime
+                            placeholder: "00:00"
+                            onValueEdited: newValue => {
+                                Config.nightLight.forcedSunsetTime = newValue.trim();
+                            }
+                        }
+
+                        TextInputRow {
+                            Layout.fillWidth: true
+                            visible: Config.nightLight.mode === "always"
+                            label: "Sunrise"
+                            value: Config.nightLight.forcedSunriseTime
+                            placeholder: "23:59"
+                            onValueEdited: newValue => {
+                                Config.nightLight.forcedSunriseTime = newValue.trim();
+                            }
+                        }
+
+                        Text {
+                            text: "Process"
+                            font.family: Config.theme.font
+                            font.pixelSize: Styling.fontSize(0)
+                            color: Colors.overBackground
+                            Layout.topMargin: 8
+                        }
+
+                        TextInputRow {
+                            Layout.fillWidth: true
+                            label: "Command"
+                            value: Config.nightLight.command
+                            placeholder: "wlsunset"
+                            onValueEdited: newValue => {
+                                Config.nightLight.command = newValue.trim() || "wlsunset";
+                            }
+                        }
+
+                        TextInputRow {
+                            Layout.fillWidth: true
+                            label: "Process"
+                            value: Config.nightLight.processName
+                            placeholder: "wlsunset"
+                            onValueEdited: newValue => {
+                                Config.nightLight.processName = newValue.trim() || "wlsunset";
+                            }
+                        }
+
+                        ToggleRow {
+                            Layout.fillWidth: true
+                            label: "Use pkill fallback"
+                            description: "Stop external wlsunset processes if needed"
+                            checked: Config.nightLight.usePkillFallback
+                            onToggled: checked => {
+                                Config.nightLight.usePkillFallback = checked;
+                            }
+                        }
+
+                        ToggleRow {
+                            Layout.fillWidth: true
+                            label: "Check on startup"
+                            description: "Sync the service with any existing wlsunset process"
+                            checked: Config.nightLight.checkOnStartup
+                            onToggled: checked => {
+                                Config.nightLight.checkOnStartup = checked;
+                            }
+                        }
+
+                        ToggleRow {
+                            Layout.fillWidth: true
+                            label: "Debug logs"
+                            description: "Print NightLightService logs to the console"
+                            checked: Config.nightLight.debugLogs
+                            onToggled: checked => {
+                                Config.nightLight.debugLogs = checked;
                             }
                         }
                     }
