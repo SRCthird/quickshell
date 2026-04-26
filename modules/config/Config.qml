@@ -96,6 +96,45 @@ Singleton {
     // ============================================
     // THEME MODULE
     // ============================================
+    Process {
+        id: systemColorSchemeProcess
+        running: false
+        command: []
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                if (text.length > 0)
+                    console.log("systemColorScheme stdout:", text);
+            }
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.length > 0)
+                    console.warn("systemColorScheme stderr:", text);
+            }
+        }
+
+        onExited: code => {
+            console.log("systemColorScheme exited with code:", code);
+        }
+    }
+    function syncSystemColorScheme() {
+        var scheme = root.lightMode ? "prefer-light" : "prefer-dark";
+        var gtkDark = root.lightMode ? "false" : "true";
+
+        if (systemColorSchemeProcess.running)
+            systemColorSchemeProcess.running = false;
+
+        systemColorSchemeProcess.command = [
+            "bash",
+            "-lc",
+            "gsettings set org.gnome.desktop.interface color-scheme " + scheme + " && " +
+            "gsettings set org.gnome.desktop.interface gtk-application-prefer-dark-theme " + gtkDark
+        ];
+
+        systemColorSchemeProcess.running = true;
+    }
     FileView {
         id: themeLoader
         path: root.configBootstrapReady ? Quickshell.shellPath("config/theme.json") : ""
@@ -107,9 +146,11 @@ Singleton {
                 initModule("theme", themeLoader, () => {
                     root.themeReady = true;
                     root.themeUpdated();
+                    root.syncSystemColorScheme();
                 });
             } else {
-              root.themeUpdated();
+                root.themeUpdated();
+                root.syncSystemColorScheme();
             }
         }
         onFileChanged: {
@@ -599,6 +640,9 @@ Singleton {
     // Handle lightMode changes
     onLightModeChanged: {
         console.log("lightMode changed to:", lightMode);
+
+        syncSystemColorScheme();
+
         if (GlobalStates.wallpaperManager) {
             var wallpaperManager = GlobalStates.wallpaperManager;
             if (wallpaperManager.currentWallpaper) {
@@ -607,7 +651,6 @@ Singleton {
             }
         }
     }
-
     // Bar configuration
     property QtObject bar: barLoader.adapter
     property bool showBackground: theme.srBarBg.opacity > 0
