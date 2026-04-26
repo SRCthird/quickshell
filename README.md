@@ -7,6 +7,28 @@ This project provides a unified desktop experience for Hyprland workflows, inclu
 ### Fork
 Fork of https://github.com/Axenide/Ambxst/releases/tag/1.1.2
 
+## Preview
+
+<p align="center">
+  <img src="/assets/screenshots/preview-1.png" width="48%" />
+  <img src="/assets/screenshots/preview-2.png" width="48%" />
+</p>
+
+<p align="center">
+  <img src="/assets/screenshots/preview-3.png" width="48%" />
+  <img src="/assets/screenshots/preview-4.png" width="48%" />
+</p>
+
+<p align="center">
+  <img src="/assets/screenshots/preview-5.png" width="48%" />
+  <img src="/assets/screenshots/preview-6.png" width="48%" />
+</p>
+
+<p align="center">
+  <img src="/assets/screenshots/preview-7.png" width="48%" />
+  <img src="/assets/screenshots/preview-9.png" width="48%" />
+</p>
+
 ## Features
 
 - **Unified shell interface** with bar, dock, notch, overlays, OSD layers, and desktop widgets
