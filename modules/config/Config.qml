@@ -38,8 +38,9 @@ Singleton {
     property bool aiReady: false
     property bool pinnedAppsReady: false
     property bool keybindsReady: false
+    property bool nightLightReady: false
 
-    property bool initialLoadComplete: themeReady && barReady && workspacesReady && overviewReady && notchReady && compositorReady && performanceReady && weatherReady && desktopReady && lockscreenReady && prefixReady && systemReady && dockReady && aiReady && pinnedAppsReady
+    property bool initialLoadComplete: nightLightReady && themeReady && barReady && workspacesReady && overviewReady && notchReady && compositorReady && performanceReady && weatherReady && desktopReady && lockscreenReady && prefixReady && systemReady && dockReady && aiReady && pinnedAppsReady
 
     // ============================================
     // BATCH INITIALIZATION
@@ -55,7 +56,7 @@ Singleton {
             cfg="${Quickshell.shellDir}/config"
             mkdir -p "$cfg"
 
-            for f in ai bar binds compositor desktop dock lockscreen notch overview performance prefix system theme weather workspaces; do
+            for f in ai bar binds compositor desktop dock lockscreen nightlight notch overview performance prefix system theme weather workspaces; do
                 [ -e "$cfg/$f.json" ] || : > "$cfg/$f.json"
             done
 
@@ -91,6 +92,40 @@ Singleton {
 
         loader.writeAdapter();
         onComplete();
+    }
+
+    // ============================================
+    // NIGHT LIGHT MODULE
+    // ============================================
+    FileView {
+        id: nightLightLoader
+        path: root.configBootstrapReady ? Quickshell.shellPath("config/nightlight.json") : ""
+        atomicWrites: true
+        watchChanges: true
+
+        onLoaded: {
+            if (!root.nightLightReady) {
+                initModule("nightlight", nightLightLoader, () => {
+                    root.nightLightReady = true;
+                });
+            }
+        }
+
+        onFileChanged: {
+            root.pauseAutoSave = true;
+            reload();
+            root.pauseAutoSave = false;
+        }
+
+        onPathChanged: reload()
+
+        onAdapterUpdated: {
+            if (root.nightLightReady && !root.pauseAutoSave) {
+                nightLightLoader.writeAdapter();
+            }
+        }
+
+        adapter: NightLightAdapter {}
     }
 
     // ============================================
@@ -703,6 +738,9 @@ Singleton {
     property real compositorShadowOpacity: compositor.syncShadowOpacity ? theme.shadowOpacity : compositor.shadowOpacity
     property string compositorShadowColor: compositor.syncShadowColor ? theme.shadowColor : compositor.shadowColor
 
+    // Night Light configuration
+    property QtObject nightLight: nightLightLoader.adapter
+
     // Performance configuration
     property QtObject performance: performanceLoader.adapter
     property bool blurTransition: performance.blurTransition
@@ -740,6 +778,9 @@ Singleton {
     property QtObject keybinds: keybindsLoader.adapter
 
     // Module save functions
+    function saveNightLight() {
+        nightLightLoader.writeAdapter();
+    }
     function saveBar() {
         barLoader.writeAdapter();
     }
