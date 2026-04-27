@@ -48,7 +48,7 @@ PKGS=(
   ttf-roboto ttf-roboto-mono ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk noto-fonts-emoji
   ttf-nerd-fonts-symbols
   matugen gpu-screen-recorder wl-clip-persist mpvpaper gradia
-  quickshell ttf-phosphor-icons ttf-league-gothic adw-gtk-theme
+  quickshell-git ttf-phosphor-icons ttf-league-gothic adw-gtk-theme
 )
 
 log_info "Installing dependencies with $AUR_HELPER..."
