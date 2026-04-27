@@ -12,22 +12,6 @@ QtObject {
     id: root
 
     readonly property string appId: "shell"
-    readonly property string ipcPipe: "/tmp/shell_ipc.pipe"
-
-    // High-performance Pipe Listener (Daemon mode)
-    property Process pipeListener: Process {
-        command: ["bash", "-c", "rm -f " + root.ipcPipe + "; mkfifo " + root.ipcPipe + "; tail -f " + root.ipcPipe]
-        running: true
-        
-        stdout: SplitParser {
-            onRead: data => {
-                const cmd = data.trim();
-                if (cmd !== "") {
-                    root.run(cmd);
-                }
-            }
-        }
-    }
 
     property IpcHandler ipcShellHandler: IpcHandler {
         target: "shell"
@@ -71,32 +55,31 @@ QtObject {
         target: "system"
 
         function overview() {
-          toggleSimpleModule("overview");
+            toggleSimpleModule("overview");
         } 
         function powermenu() {
-          toggleSimpleModule("powermenu");
+            toggleSimpleModule("powermenu");
         }
         function tools() {
-          toggleSimpleModule("tools");
+            toggleSimpleModule("tools");
         }
         function configs() {
-          toggleSettings();
+            toggleSettings();
         }
         function screenshot(){
-          Screenshot.initialize();
-          GlobalStates.screenshotToolVisible = true;
+            Screenshot.initialize();
+            GlobalStates.screenshotToolVisible = true;
         } 
         function screenrecord() {
-          ScreenRecorder.initialize();
-          GlobalStates.screenRecordToolVisible = true;
+            toggleScreenRecord();
         }
         function lens() {
-          Screenshot.initialize();
-          Screenshot.captureMode = "lens";
-          GlobalStates.screenshotToolVisible = true;
+            Screenshot.initialize();
+            Screenshot.captureMode = "lens";
+            GlobalStates.screenshotToolVisible = true;
         }
         function lockscreen() {
-          GlobalStates.lockscreenVisible = true;
+            GlobalStates.lockscreenVisible = true;
         }
     }
 
@@ -124,6 +107,18 @@ QtObject {
         function previous() {
             MprisController.previous();
         }
+    }
+
+    function toggleScreenRecord() {
+        ScreenRecorder.initialize();
+
+        if (ScreenRecorder.isRecording) {
+            ScreenRecorder.toggleRecording();
+            GlobalStates.screenRecordToolVisible = false;
+            return;
+        }
+
+        GlobalStates.screenRecordToolVisible = true;
     }
 
     function toggleSettings() {
