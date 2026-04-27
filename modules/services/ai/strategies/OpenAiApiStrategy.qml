@@ -98,8 +98,20 @@ ApiStrategy {
         if (trimmed === "data: [DONE]")
             return { content: "", done: true, error: null };
 
-        if (!trimmed.startsWith("data: "))
+        if (!trimmed.startsWith("data: ")) {
+            try {
+                let json = JSON.parse(trimmed);
+                if (json.error) {
+                    return {
+                        content: "",
+                        done: false,
+                        error: json.error.message || JSON.stringify(json.error)
+                    };
+                }
+            } catch (e) {}
+
             return { content: "", done: false, error: null };
+        }
 
         try {
             let json = JSON.parse(trimmed.substring(6));

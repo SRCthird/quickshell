@@ -178,22 +178,7 @@ Singleton {
         saveCurrentChat();
     }
 
-    property var systemTools: [
-        {
-            name: "run_shell_command",
-            description: "Execute a shell command on the user's system (Linux). Use this to list files, control the system, or run utilities. Output will be returned.",
-            parameters: {
-                type: "OBJECT",
-                properties: {
-                    command: {
-                        type: "STRING",
-                        description: "The shell command to run (e.g. 'ls -la', 'ip addr')"
-                    }
-                },
-                required: ["command"]
-            }
-        }
-    ]
+    property var systemTools: [ ]
 
     // ============================================
     // CHAT MANAGEMENT
@@ -446,7 +431,8 @@ Singleton {
                 .replace("{{ENDPOINT}}", payload.endpoint)
                 .replace("{{API_KEY}}", getApiKey(currentModel));
         } else {
-            curlCmd = "curl -s --no-buffer -N -X POST \"" + payload.endpoint + "\" " + headerArgs + " -d @" + bodyPath;
+            curlCmd = "curl -sS --fail-with-body --no-buffer -N -X POST \"" + payload.endpoint + "\" " + headerArgs + " -d @" + bodyPath;
+            // curlCmd = "curl -s --no-buffer -N -X POST \"" + payload.endpoint + "\" " + headerArgs + " -d @" + bodyPath;
         }
 
         curlProcess.command = ["/usr/bin/bash", "-c", curlCmd];
@@ -495,6 +481,7 @@ Singleton {
         // Use SplitParser for streaming — emits onRead per line
         stdout: SplitParser {
             onRead: data => {
+                console.log("RAW API:", data);
                 let result = root.currentStrategy.parseStreamChunk(data);
 
                 if (result.error) {
@@ -840,7 +827,7 @@ for f in files:
                     let data = JSON.parse(fetchOpenAIOut.text);
                     if (data.data) {
                         let newModels = [];
-                        let allowed = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "o1", "o1-mini", "o1-preview", "o3-mini"];
+                        let allowed = ["gpt-5.1", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "o1", "o1-mini", "o1-preview", "o3-mini"];
                         for (let i = 0; i < data.data.length; i++) {
                             let item = data.data[i];
                             let id = item.id;
