@@ -22,6 +22,17 @@ ActionGrid {
         property string type: "button"
     }
 
+    QtObject {
+      id: motionCueAction
+
+      property string icon: MotionCues.enabled ? Icons.waveform : Icons.dotsNine
+      property string text: MotionCues.enabled ? "On" : ""
+      property string tooltip: MotionCues.enabled ? "Disable Motion Cues" : "Enable Motion Cues"
+      property string command: ""
+      property string variant: MotionCues.enabled ? "primary" : ""
+      property string type: "button"
+    }
+
     layout: "row"
     buttonSize: 48
     iconSize: 20
@@ -74,7 +85,8 @@ ActionGrid {
             icon: GlobalStates.mirrorWindowVisible ? Icons.webcamSlash : Icons.webcam,
             tooltip: "Mirror",
             command: ""
-        }
+        },
+        motionCueAction
     ]
 
     Process {
@@ -167,6 +179,8 @@ ActionGrid {
             root.itemSelected();
         } else if (action.tooltip === "Mirror") {
             GlobalStates.mirrorWindowVisible = !GlobalStates.mirrorWindowVisible;
+        } else if (action.tooltip === "Enable Motion Cues" || action.tooltip === "Disable Motion Cues") {
+            MotionCues.toggle();
         }
     }
 }
