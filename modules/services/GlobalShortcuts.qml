@@ -54,6 +54,9 @@ QtObject {
     property IpcHandler ipcSystemHandler: IpcHandler {
         target: "system"
 
+        function motioncues() {
+            MotionCues.toggle();
+        }
         function overview() {
             toggleSimpleModule("overview");
         } 
