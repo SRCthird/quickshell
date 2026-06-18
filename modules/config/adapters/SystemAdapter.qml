@@ -45,4 +45,19 @@ JsonAdapter {
         property bool autoStart: false
         property bool syncSpotify: false
     }
+
+    property JsonObject motionCues: JsonObject {
+      property bool enabledByDefault: false
+      // Leave empty for fake test motion.
+      // My laptop doesn't have IIO :( 
+      // But this can be any command that prints JSON lines:
+      // {"x":0.1,"y":-0.2}
+      property string sourceCommand: ""
+      property int dotRadius: 4
+      property int spacing: 54
+      property int edgeInset: 28
+      property int maxShift: 34
+      property real opacity: 0.55
+      property real smoothing: 0.18
+    }
 }
