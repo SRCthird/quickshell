@@ -210,6 +210,23 @@ ShellRoot {
         }
     }
 
+    // Motion cues overlay
+    Variants {
+      model: Quickshell.screens
+
+      Loader {
+        id: motionCuesLoader
+
+        active: SuspendManager.wakeReady && MotionCues.enabled
+
+        required property ShellScreen modelData
+
+        sourceComponent: MotionCueOverlay {
+          targetScreen: motionCuesLoader.modelData
+        }
+      }
+    }
+
     // Screen recording tool
     Loader {
         id: screenRecordLoader
