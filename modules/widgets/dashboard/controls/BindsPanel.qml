@@ -18,36 +18,52 @@ Item {
     // Current category being viewed
     property string currentCategory: "shell"
 
-    // Process for unbinding keybinds
     Process {
         id: unbindProcess
+
+        stderr: SplitParser {
+            onRead: line => {
+                if (line && line.trim().length > 0) {
+                    console.error("BindsPanel: Failed to unbind keybind:", line);
+                }
+            }
+        }
     }
 
-    // Function to unbind a specific keybind (supports both old and new format)
     function unbindKeybind(bind) {
-        if (!bind)
+        if (!bind || !bind.keys || bind.keys.length === 0)
             return;
 
-        // Check if new format with keys[]
-        if (bind.keys && bind.keys.length > 0) {
-            for (let k = 0; k < bind.keys.length; k++) {
-                const keyObj = bind.keys[k];
-                const mods = keyObj.modifiers && keyObj.modifiers.length > 0 ? keyObj.modifiers.join(" ") : "";
-                const key = keyObj.key || "";
-                const command = `hyprctl keyword unbind "${mods},${key}"`
-                console.log("BindsPanel: Unbinding keybind:", command);
-                unbindProcess.command = ["sh", "-c", command];
-                unbindProcess.running = true;
-            }
-        } else {
-            // Old format fallback
-            const mods = bind.modifiers && bind.modifiers.length > 0 ? bind.modifiers.join(" ") : "";
-            const key = bind.key || "";
-            const command = `hyprctl keyword unbind ${mods},${key}`;
-            console.log("BindsPanel: Unbinding keybind:", command);
-            unbindProcess.command = ["sh", "-c", command];
-            unbindProcess.running = true;
+        const commands = [];
+
+        for (let k = 0; k < bind.keys.length; k++) {
+            const keyObj = bind.keys[k];
+            const modifiers = keyObj.modifiers || [];
+            const key = keyObj.key || "";
+
+            if (!key)
+                continue;
+
+            const keybind = modifiers.length > 0
+                ? modifiers.join(" + ") + " + " + key
+                : key;
+
+            commands.push(`hl.unbind(${JSON.stringify(keybind)})`);
         }
+
+        if (commands.length === 0)
+            return;
+
+        const lua = commands.join("\n");
+
+        console.log("BindsPanel: Unbinding keybinds:", lua);
+
+        unbindProcess.command = [
+            "hyprctl",
+            "eval",
+            lua
+        ];
+        unbindProcess.running = true;
     }
 
     // Edit mode state
