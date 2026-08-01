@@ -144,7 +144,7 @@ Item {
         // Close overview and focus the matched window
         Visibilities.setActiveModule("", true);
         Qt.callLater(() => {
-            HyprctlService.dispatch(`focuswindow address:${win.address}`);
+            HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${win.address}" })`);
         });
     }
 
@@ -265,14 +265,14 @@ Item {
                                 onClicked: {
                                     if (overviewRoot.draggingTargetWorkspace === -1) {
                                         // Only switch workspace, don't close overview
-                                        HyprctlService.dispatch(`workspace ${workspaceValue}`);
+                                        HyprctlService.dispatch(`hl.dsp.focus({ workspace = "${workspaceValue}" })`);
                                     }
                                 }
                                 onDoubleClicked: {
                                     if (overviewRoot.draggingTargetWorkspace === -1) {
                                         // Double click closes overview and switches workspace
                                         Visibilities.setActiveModule("");
-                                        HyprctlService.dispatch(`workspace ${workspaceValue}`);
+                                        HyprctlService.dispatch(`hl.dsp.focus({ workspace = "${workspaceValue}" })`);
                                     }
                                 }
                             }
@@ -354,7 +354,7 @@ Item {
                     onDragFinished: targetWorkspace => {
                         overviewRoot.draggingFromWorkspace = -1;
                         if (targetWorkspace !== -1 && targetWorkspace !== windowData?.workspace.id) {
-                            HyprctlService.dispatch(`movetoworkspacesilent ${targetWorkspace}, address:${windowData?.address}`);
+                            HyprctlService.dispatch(`hl.dsp.window.move({ workspace = "${targetWorkspace}", window = "address:${windowData?.address}", follow = false })`);
                         }
                     }
                     onWindowClicked: {
@@ -362,11 +362,11 @@ Item {
                         // Skip generic focus restoration since we're handling it specifically
                         Visibilities.setActiveModule("", true);
                         Qt.callLater(() => {
-                            HyprctlService.dispatch(`focuswindow address:${windowData.address}`);
+                            HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${windowData.address}" })`);
                         });
                     }
                     onWindowClosed: {
-                        HyprctlService.dispatch(`closewindow address:${windowData.address}`);
+                        HyprctlService.dispatch(`hl.dsp.window.close("address:${windowData.address}")`);
                     }
                 }
             }

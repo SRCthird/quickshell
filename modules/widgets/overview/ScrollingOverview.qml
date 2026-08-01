@@ -124,7 +124,7 @@ Item {
             return;
         Visibilities.setActiveModule("", true);
         Qt.callLater(() => {
-            HyprctlService.dispatch(`focuswindow address:${win.address}`);
+            HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${win.address}" })`);
         });
     }
 

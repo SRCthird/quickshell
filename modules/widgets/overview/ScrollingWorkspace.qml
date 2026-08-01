@@ -266,7 +266,7 @@ Item {
             TapHandler {
                 acceptedButtons: Qt.LeftButton
                 onDoubleTapped: {
-                    HyprctlService.dispatch(`workspace ${root.workspaceId}`);
+                    HyprctlService.dispatch(`hl.dsp.focus({ workspace = "${root.workspaceId}" })`);
                     Visibilities.setActiveModule("", true);
                 }
             }
@@ -579,14 +579,14 @@ Item {
                                             const percentageY = Math.round((actualY / adjustedMonitorHeight) * 100);
                                             
                                             // Move to workspace and set position
-                                            HyprctlService.dispatch(`movetoworkspacesilent ${targetWs}, address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}`);
-                                            HyprctlService.dispatch(`movewindowpixel exact ${percentageX}% ${percentageY}%, address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}`);
+                                            HyprctlService.dispatch(`hl.dsp.window.move({ workspace = "${targetWs}", window = "address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}", follow = false })`);
+                                            HyprctlService.dispatch(`hl.dsp.window.move({ x = ${Math.round((percentageX / 100) * ((monitorData && monitorData.width !== undefined ? monitorData.width : 1920) || 1920))}, y = ${Math.round((percentageY / 100) * ((monitorData && monitorData.height !== undefined ? monitorData.height : 1080) || 1080))}, window = "address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}" })`);
                                             
                                             // Force immediate window data update
                                             CompositorData.updateWindowList();
                                         } else {
                                             // Just move workspace without repositioning for tiled windows
-                                            HyprctlService.dispatch(`movetoworkspacesilent ${targetWs}, address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}`);
+                                            HyprctlService.dispatch(`hl.dsp.window.move({ workspace = "${targetWs}", window = "address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}", follow = false })`);
                                             
                                             // Force immediate window data update
                                             CompositorData.updateWindowList();
@@ -642,7 +642,7 @@ Item {
                                         const percentageY = Math.round((actualY / adjustedMonitorHeight) * 100);
                                         
                                         // Dispatch movewindowpixel command
-                                        HyprctlService.dispatch(`movewindowpixel exact ${percentageX}% ${percentageY}%, address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}`);
+                                        HyprctlService.dispatch(`hl.dsp.window.move({ x = ${Math.round((percentageX / 100) * ((monitorData && monitorData.width !== undefined ? monitorData.width : 1920) || 1920))}, y = ${Math.round((percentageY / 100) * ((monitorData && monitorData.height !== undefined ? monitorData.height : 1080) || 1080))}, window = "address:${(windowDelegate.windowData && windowDelegate.windowData.address !== undefined ? windowDelegate.windowData.address : "")}" })`);
                                         
                                         // Force immediate window data update
                                         CompositorData.updateWindowList();
@@ -687,9 +687,9 @@ Item {
                             if (!windowDelegate.windowData)
                                 return;
                             if (mouse.button === Qt.LeftButton && !windowDelegate.dragging) {
-                                HyprctlService.dispatch(`focuswindow address:${windowDelegate.windowData.address}`);
+                                HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${windowDelegate.windowData.address}" })`);
                             } else if (mouse.button === Qt.MiddleButton) {
-                                HyprctlService.dispatch(`closewindow address:${windowDelegate.windowData.address}`);
+                                HyprctlService.dispatch(`hl.dsp.window.close("address:${windowDelegate.windowData.address}")`);
                             }
                         }
 
@@ -699,7 +699,7 @@ Item {
                             if (mouse.button === Qt.LeftButton) {
                                 Visibilities.setActiveModule("", true);
                                 Qt.callLater(() => {
-                                    HyprctlService.dispatch(`focuswindow address:${windowDelegate.windowData.address}`);
+                                    HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${windowDelegate.windowData.address}" })`);
                                 });
                             }
                         }

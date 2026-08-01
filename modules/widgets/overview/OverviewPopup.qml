@@ -202,9 +202,9 @@ PanelWindow {
                             const current = HyprctlService.focusedWorkspace?.id || 1;
                             const next = current + 1;
                             if (next > Config.workspaces.shown) {
-                                HyprctlService.dispatch("workspace 1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "1" })`);
                             } else {
-                                HyprctlService.dispatch("workspace r+1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r+1" })`);
                             }
                         } else if (overviewLoader.item) {
                             overviewLoader.item.selectNextMatch();
@@ -216,9 +216,9 @@ PanelWindow {
                             const current = HyprctlService.focusedWorkspace?.id || 1;
                             const prev = current - 1;
                             if (prev < 1) {
-                                HyprctlService.dispatch("workspace " + Config.workspaces.shown);
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "${Config.workspaces.shown}" })`);
                             } else {
-                                HyprctlService.dispatch("workspace r-1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r-1" })`);
                             }
                         } else if (overviewLoader.item) {
                             overviewLoader.item.selectPrevMatch();
@@ -253,9 +253,9 @@ PanelWindow {
                             const current = HyprctlService.focusedWorkspace?.id || 1;
                             const prev = current - 1;
                             if (prev < 1) {
-                                HyprctlService.dispatch("workspace " + Config.workspaces.shown);
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "${Config.workspaces.shown}" })`);
                             } else {
-                                HyprctlService.dispatch("workspace r-1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r-1" })`);
                             }
                         } else if (overviewLoader.item) {
                             overviewLoader.item.selectPrevMatch();
@@ -267,9 +267,9 @@ PanelWindow {
                             const current = HyprctlService.focusedWorkspace?.id || 1;
                             const next = current + 1;
                             if (next > Config.workspaces.shown) {
-                                HyprctlService.dispatch("workspace 1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "1" })`);
                             } else {
-                                HyprctlService.dispatch("workspace r+1");
+                                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r+1" })`);
                             }
                         } else if (overviewLoader.item) {
                             overviewLoader.item.selectNextMatch();

@@ -257,7 +257,7 @@ Item {
 
                 // Only focus if the window is in the current workspace
                 if (currentWorkspace && windowWorkspace && currentWorkspace === windowWorkspace) {
-                    HyprctlService.dispatch(`focuswindow address:${windowData.address}`);
+                    HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${windowData.address}" })`);
                 }
             }
         }
@@ -317,14 +317,14 @@ Item {
                         const percentageY = Math.round((relativeY / root.availableWorkspaceHeight) * 100);
                         
                         // Move to workspace and set position
-                        HyprctlService.dispatch(`movetoworkspacesilent ${targetWorkspace}, address:${windowData?.address}`);
-                        HyprctlService.dispatch(`movewindowpixel exact ${percentageX}% ${percentageY}%, address:${windowData?.address}`);
+                        HyprctlService.dispatch(`hl.dsp.window.move({ workspace = "${targetWorkspace}", window = "address:${windowData?.address}", follow = false })`);
+                        HyprctlService.dispatch(`hl.dsp.window.move({ x = ${Math.round((percentageX / 100) * (monitorData?.width || 1920))}, y = ${Math.round((percentageY / 100) * (monitorData?.height || 1080))}, window = "address:${windowData?.address}" })`);
                         
                         // Force immediate window data update
                         CompositorData.updateWindowList();
                     } else {
                         // Just move workspace without repositioning
-                        HyprctlService.dispatch(`movetoworkspacesilent ${targetWorkspace}, address:${windowData?.address}`);
+                        HyprctlService.dispatch(`hl.dsp.window.move({ workspace = "${targetWorkspace}", window = "address:${windowData?.address}", follow = false })`);
                         
                         // Force immediate window data update
                         CompositorData.updateWindowList();
@@ -344,7 +344,7 @@ Item {
                     const draggedX = root.x;
                     const draggedY = root.y;
                     
-                    HyprctlService.dispatch(`movewindowpixel exact ${percentageX}% ${percentageY}%, address:${windowData?.address}`);
+                    HyprctlService.dispatch(`hl.dsp.window.move({ x = ${Math.round((percentageX / 100) * (monitorData?.width || 1920))}, y = ${Math.round((percentageY / 100) * (monitorData?.height || 1080))}, window = "address:${windowData?.address}" })`);
                     
                     // Force immediate window data update
                     CompositorData.updateWindowList();
@@ -372,7 +372,7 @@ Item {
 
             if (mouse.button === Qt.LeftButton) {
                 // Single click just focuses the window without closing overview
-                HyprctlService.dispatch(`focuswindow address:${windowData.address}`);
+                HyprctlService.dispatch(`hl.dsp.focus({ window = "address:${windowData.address}" })`);
             } else if (mouse.button === Qt.MiddleButton) {
                 root.windowClosed();
             }

@@ -28,49 +28,33 @@ Singleton {
 
     signal rawEvent(var event)
 
-    function dispatch(command) {
-        if (!command) return;
+    function dispatch(dispatcher) {
+        if (!dispatcher) return;
 
-        let spaceIdx = command.indexOf(" ");
-        let action = spaceIdx !== -1 ? command.substring(0, spaceIdx).trim() : command.trim();
-        let rawArgs = spaceIdx !== -1 ? command.substring(spaceIdx + 1).trim() : "";
+        const proc = Qt.createQmlObject(
+            "import Quickshell.Io; Process {}",
+            root
+        );
 
-        function getAddr(str) {
-            let m = str.match(/address:([^\s,]+)/);
-            return m ? m[1] : str.trim();
-        }
+        proc.command = [
+            "hyprctl",
+            "dispatch",
+            dispatcher
+        ];
 
-        let finalCommand = ["hyprctl", "dispatch"];
-
-        if (action === "workspace") {
-            finalCommand.push("workspace");
-            if (rawArgs) finalCommand.push(rawArgs);
-        } else if (action === "closewindow") {
-            finalCommand.push("closewindow");
-            if (rawArgs) finalCommand.push("address:" + getAddr(rawArgs));
-        } else if (action === "focuswindow") {
-            finalCommand.push("focuswindow");
-            if (rawArgs) finalCommand.push("address:" + getAddr(rawArgs));
-        } else if (action === "movetoworkspacesilent") {
-            finalCommand.push("movetoworkspacesilent");
-            let subParts = rawArgs.split(",");
-            let ws = subParts.length > 0 ? subParts[0].trim() : "";
-            if (subParts.length > 1) {
-                finalCommand.push(ws + ",address:" + getAddr(subParts[1]));
-            } else if (ws) {
-                finalCommand.push(ws);
+        proc.onExited.connect(code => {
+            if (code !== 0) {
+                console.warn(
+                    "HyprctlService: Dispatcher failed:",
+                    dispatcher,
+                    "exit code:",
+                    code
+                );
             }
-        } else if (action === "togglespecialworkspace") {
-            finalCommand.push("togglespecialworkspace");
-            if (rawArgs) finalCommand.push(rawArgs);
-        } else {
-            finalCommand.push(action);
-            if (rawArgs) finalCommand.push(rawArgs);
-        }
 
-        let proc = Qt.createQmlObject("import Quickshell.Io; Process {}", root);
-        proc.command = finalCommand;
-        proc.onExited.connect(() => proc.destroy());
+            proc.destroy();
+        });
+
         proc.running = true;
     }
 

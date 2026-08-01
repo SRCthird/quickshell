@@ -164,9 +164,9 @@ Item {
     WheelHandler {
         onWheel: event => {
             if (event.angleDelta.y < 0)
-                HyprctlService.dispatch(`workspace r+1`);
+                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r+1" })`);
             else if (event.angleDelta.y > 0)
-                HyprctlService.dispatch(`workspace r-1`);
+                HyprctlService.dispatch(`hl.dsp.focus({ workspace = "r-1" })`);
         }
         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
     }
@@ -176,7 +176,9 @@ Item {
         acceptedButtons: Qt.BackButton
         onPressed: event => {
             if (event.button === Qt.BackButton) {
-                HyprctlService.dispatch(`togglespecialworkspace`);
+                HyprctlService.dispatch(
+                    `hl.dsp.workspace.toggle_special("magic")`
+                );
             }
         }
     }
@@ -408,7 +410,9 @@ Item {
                 id: button
                 property int workspaceValue: getWorkspaceId(index)
                 Layout.fillHeight: true
-                onPressed: HyprctlService.dispatch(`workspace ${workspaceValue}`)
+                onPressed: HyprctlService.dispatch(
+                    `hl.dsp.focus({ workspace = "${workspaceValue}" })`
+                )
                 width: workspaceButtonWidth
 
                 background: Item {
@@ -538,7 +542,9 @@ Item {
                 id: buttonVert
                 property int workspaceValue: getWorkspaceId(index)
                 Layout.fillWidth: true
-                onPressed: HyprctlService.dispatch(`workspace ${workspaceValue}`)
+                onPressed: HyprctlService.dispatch(
+                    `hl.dsp.focus({ workspace = "${workspaceValue}" })`
+                )
                 height: workspaceButtonWidth
 
                 background: Item {
