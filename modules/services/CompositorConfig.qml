@@ -10,7 +10,21 @@ import qs.modules.globals
 QtObject {
     id: root
 
-    property Process compositorProcess: Process {}
+    property Process compositorProcess: Process {
+        stderr: SplitParser {
+            onRead: line => {
+                if (line && line.trim().length > 0) {
+                    console.error("CompositorConfig: hyprctl eval error:", line);
+                }
+            }
+        }
+
+        onExited: code => {
+            if (code !== 0) {
+                console.error("CompositorConfig: hyprctl eval exited with code:", code);
+            }
+        }
+    }
 
     function configReady() {
         return Config.themeReady
@@ -78,6 +92,77 @@ QtObject {
         }
     }
 
+    function luaString(value) {
+        return JSON.stringify(String(value));
+    }
+
+    function luaBoolean(value) {
+        return value ? "true" : "false";
+    }
+
+    function luaNumber(value, fallback) {
+        const parsed = Number(value);
+        return isFinite(parsed) ? String(parsed) : String(fallback);
+    }
+
+    function luaScalar(value, fallback) {
+        if (typeof value === "boolean")
+            return luaBoolean(value);
+
+        if (typeof value === "number")
+            return luaNumber(value, fallback);
+
+        const stringValue = String(value);
+        const parsed = Number(value);
+
+        if (stringValue.trim() !== "" && isFinite(parsed))
+            return String(parsed);
+
+        return luaString(value);
+    }
+
+    function formatGradientForLua(colorNames, fallbackColorName, angle, forceOpaque) {
+        const names = colorNames && colorNames.length > 0
+            ? colorNames
+            : [fallbackColorName];
+
+        const colors = names.map(colorName => {
+            const color = getColorValue(colorName);
+            const resolvedColor = forceOpaque
+                ? Qt.rgba(color.r, color.g, color.b, 1.0)
+                : color;
+
+            return luaString(formatColorForCompositor(resolvedColor));
+        });
+
+        if (colors.length === 1)
+            return colors[0];
+
+        return `{ colors = { ${colors.join(", ")} }, angle = ${luaNumber(angle, 0)} }`;
+    }
+
+    function formatVec2ForLua(value) {
+        if (Array.isArray(value) && value.length >= 2) {
+            return `{ ${luaNumber(value[0], 0)}, ${luaNumber(value[1], 0)} }`;
+        }
+
+        if (value && value.x !== undefined && value.y !== undefined) {
+            return `{ ${luaNumber(value.x, 0)}, ${luaNumber(value.y, 0)} }`;
+        }
+
+        const text = value === undefined || value === null ? "" : String(value);
+        const parts = text
+            .replace(/[\[\](),]/g, " ")
+            .trim()
+            .split(/\s+/);
+
+        if (parts.length >= 2) {
+            return `{ ${luaNumber(parts[0], 0)}, ${luaNumber(parts[1], 0)} }`;
+        }
+
+        return "{ 0, 0 }";
+    }
+
     function applyCompositorConfig() {
         readAnimationsProcess.running = true;
         applyTimer.restart();
@@ -95,67 +180,59 @@ QtObject {
             return;
         }
 
-        // Determine active colors.
-        let activeColorFormatted = "";
-        // Force compositorBorderColor if syncBorderColor is enabled, otherwise use configured list (supports gradients).
-        const borderColors = Config.compositor.syncBorderColor ? null : Config.compositor.activeBorderColor;
+        const activeBorderLua = Config.compositor.syncBorderColor
+            ? luaString(formatColorForCompositor(getColorValue(Config.compositorBorderColor)))
+            : formatGradientForLua(
+                Config.compositor.activeBorderColor,
+                Config.compositorBorderColor,
+                Config.compositor.borderAngle,
+                false
+            );
 
-        if (borderColors && borderColors.length > 1) {
-            // Multi-color gradient.
-            const formattedColors = borderColors.map(colorName => {
-                const color = getColorValue(colorName);
-                return formatColorForCompositor(color);
-            }).join(" ");
-            activeColorFormatted = `${formattedColors} ${Config.compositor.borderAngle}deg`;
-        } else {
-            // Single color: if sync enabled or empty, use compositorBorderColor; otherwise use first element.
-            const singleColorName = (borderColors && borderColors.length === 1) ? borderColors[0] : Config.compositorBorderColor;
-            const activeColor = getColorValue(singleColorName);
-            activeColorFormatted = formatColorForCompositor(activeColor);
-        }
-
-        // Determine inactive colors.
-        let inactiveColorFormatted = "";
-        const inactiveBorderColors = Config.compositor.inactiveBorderColor;
-
-        if (inactiveBorderColors && inactiveBorderColors.length > 1) {
-            // Multi-color gradient.
-            const formattedColors = inactiveBorderColors.map(colorName => {
-                const color = getColorValue(colorName);
-                const colorWithFullOpacity = Qt.rgba(color.r, color.g, color.b, 1.0);
-                return formatColorForCompositor(colorWithFullOpacity);
-            }).join(" ");
-            inactiveColorFormatted = `${formattedColors} ${Config.compositor.inactiveBorderAngle}deg`;
-        } else {
-            // Single color.
-            const singleColorName = (inactiveBorderColors && inactiveBorderColors.length === 1) ? inactiveBorderColors[0] : "surface";
-            const inactiveColor = getColorValue(singleColorName);
-            const inactiveColorWithFullOpacity = Qt.rgba(inactiveColor.r, inactiveColor.g, inactiveColor.b, 1.0);
-            inactiveColorFormatted = formatColorForCompositor(inactiveColorWithFullOpacity);
-        }
+        const inactiveBorderLua = formatGradientForLua(
+            Config.compositor.inactiveBorderColor,
+            "surface",
+            Config.compositor.inactiveBorderAngle,
+            true
+        );
 
         // Shadow colors.
         const shadowColor = getColorValue(Config.compositorShadowColor);
         const shadowColorInactive = getColorValue(Config.compositor.shadowColorInactive);
-        const shadowColorWithOpacity = Qt.rgba(shadowColor.r, shadowColor.g, shadowColor.b, shadowColor.a * Config.compositorShadowOpacity);
-        const shadowColorInactiveWithOpacity = Qt.rgba(shadowColorInactive.r, shadowColorInactive.g, shadowColorInactive.b, shadowColorInactive.a * Config.compositorShadowOpacity);
+        const shadowColorWithOpacity = Qt.rgba(
+            shadowColor.r,
+            shadowColor.g,
+            shadowColor.b,
+            shadowColor.a * Config.compositorShadowOpacity
+        );
+        const shadowColorInactiveWithOpacity = Qt.rgba(
+            shadowColorInactive.r,
+            shadowColorInactive.g,
+            shadowColorInactive.b,
+            shadowColorInactive.a * Config.compositorShadowOpacity
+        );
         const shadowColorFormatted = formatColorForCompositor(shadowColorWithOpacity);
         const shadowColorInactiveFormatted = formatColorForCompositor(shadowColorInactiveWithOpacity);
 
         const barOrientation = getBarOrientation();
         let speed = 2.5;
         let bezier = "default";
-        
-        if (currentAnimationConfig && currentAnimationConfig[0]) {
-            const workspaceAnim = currentAnimationConfig[0].find(anim => anim.name === "workspaces");
+
+        if (currentAnimationConfig && currentAnimationConfig.length > 0) {
+            const animations = Array.isArray(currentAnimationConfig[0])
+                ? currentAnimationConfig[0]
+                : currentAnimationConfig;
+            const workspaceAnim = animations.find(anim => anim.name === "workspaces");
+
             if (workspaceAnim) {
                 speed = workspaceAnim.speed || speed;
-                bezier = workspaceAnim.bezier || bezier;
+                bezier = workspaceAnim.bezier || workspaceAnim.curve || bezier;
             }
         }
 
-        const workspacesAnimation = barOrientation === "vertical" ? `slidefadevert 20%` : `slidefade 20%`;
-        const workspaceCommand = `keyword animation workspaces,1,${speed},${bezier},${workspacesAnimation}`;
+        const workspacesAnimation = barOrientation === "vertical"
+            ? "slidefadevert 20%"
+            : "slidefade 20%";
 
         // Calculate ignorealpha.
         let ignoreAlphaValue = 0.0;
@@ -171,52 +248,115 @@ QtObject {
             console.log(`CompositorConfig: Auto ignorealpha calculated: ${ignoreAlphaValue} (bg: ${bgOpacity}, bar: ${barBgOpacity})`);
         }
 
-        let batchCommand = "";
-        batchCommand += `keyword general:border_size ${Config.compositorBorderSize}`;
-        batchCommand += ` ; keyword general:gaps_in ${Config.compositor.gapsIn}`;
-        batchCommand += ` ; keyword general:gaps_out ${Config.compositor.gapsOut}`;
-        batchCommand += ` ; keyword general:col.active_border ${activeColorFormatted}`;
-        batchCommand += ` ; keyword general:col.inactive_border ${inactiveColorFormatted}`;
-        if (GlobalStates.compositorLayout) {
-            batchCommand += ` ; keyword general:layout ${GlobalStates.compositorLayout}`;
-        }
-        batchCommand += ` ; keyword decoration:rounding ${Config.compositorRounding}`;
-        batchCommand += ` ; keyword decoration:shadow:enabled ${Config.compositor.shadowEnabled}`;
-        batchCommand += ` ; keyword decoration:shadow:range ${Config.compositor.shadowRange}`;
-        batchCommand += ` ; keyword decoration:shadow:render_power ${Config.compositor.shadowRenderPower}`;
-        batchCommand += ` ; keyword decoration:shadow:sharp ${Config.compositor.shadowSharp}`;
-        batchCommand += ` ; keyword decoration:shadow:ignore_window ${Config.compositor.shadowIgnoreWindow}`;
-        batchCommand += ` ; keyword decoration:shadow:color ${shadowColorFormatted}`;
-        batchCommand += ` ; keyword decoration:shadow:color_inactive ${shadowColorInactiveFormatted}`;
-        batchCommand += ` ; keyword decoration:shadow:offset ${Config.compositor.shadowOffset}`;
-        batchCommand += ` ; keyword decoration:shadow:scale ${Config.compositor.shadowScale}`;
-        batchCommand += ` ; keyword decoration:blur:enabled ${Config.compositor.blurEnabled}`;
-        batchCommand += ` ; keyword decoration:blur:size ${Config.compositor.blurSize}`;
-        batchCommand += ` ; keyword decoration:blur:passes ${Config.compositor.blurPasses}`;
-        batchCommand += ` ; keyword decoration:blur:ignore_opacity ${Config.compositor.blurIgnoreOpacity}`;
-        batchCommand += ` ; keyword decoration:blur:new_optimizations ${Config.compositor.blurNewOptimizations}`;
-        batchCommand += ` ; keyword decoration:blur:xray ${Config.compositor.blurXray}`;
-        batchCommand += ` ; keyword decoration:blur:noise ${Config.compositor.blurNoise}`;
-        batchCommand += ` ; keyword decoration:blur:contrast ${Config.compositor.blurContrast}`;
-        batchCommand += ` ; keyword decoration:blur:brightness ${Config.compositor.blurBrightness}`;
-        batchCommand += ` ; keyword decoration:blur:vibrancy ${Config.compositor.blurVibrancy}`;
-        batchCommand += ` ; keyword decoration:blur:vibrancy_darkness ${Config.compositor.blurVibrancyDarkness}`;
-        batchCommand += ` ; keyword decoration:blur:special ${Config.compositor.blurSpecial}`;
-        batchCommand += ` ; keyword decoration:blur:popups ${Config.compositor.blurPopups}`;
-        batchCommand += ` ; keyword decoration:blur:popups_ignorealpha ${Config.compositor.blurPopupsIgnorealpha}`;
-        batchCommand += ` ; keyword decoration:blur:input_methods ${Config.compositor.blurInputMethods}`;
-        batchCommand += ` ; keyword decoration:blur:input_methods_ignorealpha ${Config.compositor.blurInputMethodsIgnorealpha}`;
-        batchCommand += ` ; keyword bezier myBezier,0.4,0.0,0.2,1.0`;
-        batchCommand += ` ; keyword animation windows,1,2.5,myBezier,popin 80%`;
-        batchCommand += ` ; keyword animation border,1,2.5,myBezier`;
-        batchCommand += ` ; keyword animation fade,1,2.5,myBezier`;
-        batchCommand += ` ; ${workspaceCommand}`;
-        // Note: workspaceCommand is dynamically calculated based on current animations and orientation.
+        const layoutConfig = GlobalStates.compositorLayout
+            ? `layout = ${luaString(GlobalStates.compositorLayout)},`
+            : "";
 
-        console.log(`CompositorConfig: Applying ignorealpha: ${ignoreAlphaValue}, explicit: ${Config.compositor.blurExplicitIgnoreAlpha}`);
-        batchCommand += ` ; keyword layerrule noanim,quickshell ; keyword layerrule blur,quickshell ; keyword layerrule blurpopups,quickshell ; keyword layerrule ignorealpha ${ignoreAlphaValue},quickshell`;
-        console.log("CompositorConfig: Applying compositor batch command:", batchCommand);
-        compositorProcess.command = ["hyprctl", "--batch", batchCommand];
+        const luaConfig = `
+hl.config({
+    general = {
+        border_size = ${luaNumber(Config.compositorBorderSize, 1)},
+        gaps_in = ${luaScalar(Config.compositor.gapsIn, 0)},
+        gaps_out = ${luaScalar(Config.compositor.gapsOut, 0)},
+        col = {
+            active_border = ${activeBorderLua},
+            inactive_border = ${inactiveBorderLua},
+        },
+        ${layoutConfig}
+    },
+    decoration = {
+        rounding = ${luaNumber(Config.compositorRounding, 0)},
+        shadow = {
+            enabled = ${luaBoolean(Config.compositor.shadowEnabled)},
+            range = ${luaNumber(Config.compositor.shadowRange, 4)},
+            render_power = ${luaNumber(Config.compositor.shadowRenderPower, 3)},
+            sharp = ${luaBoolean(Config.compositor.shadowSharp)},
+            color = ${luaString(shadowColorFormatted)},
+            color_inactive = ${luaString(shadowColorInactiveFormatted)},
+            offset = ${formatVec2ForLua(Config.compositor.shadowOffset)},
+            scale = ${luaNumber(Config.compositor.shadowScale, 1)},
+        },
+        blur = {
+            enabled = ${luaBoolean(Config.compositor.blurEnabled)},
+            size = ${luaNumber(Config.compositor.blurSize, 8)},
+            passes = ${luaNumber(Config.compositor.blurPasses, 1)},
+            ignore_opacity = ${luaBoolean(Config.compositor.blurIgnoreOpacity)},
+            new_optimizations = ${luaBoolean(Config.compositor.blurNewOptimizations)},
+            xray = ${luaBoolean(Config.compositor.blurXray)},
+            noise = ${luaNumber(Config.compositor.blurNoise, 0.0117)},
+            contrast = ${luaNumber(Config.compositor.blurContrast, 0.8916)},
+            brightness = ${luaNumber(Config.compositor.blurBrightness, 0.8172)},
+            vibrancy = ${luaNumber(Config.compositor.blurVibrancy, 0.1696)},
+            vibrancy_darkness = ${luaNumber(Config.compositor.blurVibrancyDarkness, 0)},
+            special = ${luaBoolean(Config.compositor.blurSpecial)},
+            popups = ${luaBoolean(Config.compositor.blurPopups)},
+            popups_ignorealpha = ${luaNumber(Config.compositor.blurPopupsIgnorealpha, 0.2)},
+            input_methods = ${luaBoolean(Config.compositor.blurInputMethods)},
+            input_methods_ignorealpha = ${luaNumber(Config.compositor.blurInputMethodsIgnorealpha, 0.2)},
+        },
+    },
+})
+
+hl.curve("myBezier", {
+    type = "bezier",
+    points = {
+        { 0.4, 0.0 },
+        { 0.2, 1.0 },
+    },
+})
+
+hl.animation({
+    leaf = "windows",
+    enabled = true,
+    speed = 2.5,
+    bezier = "myBezier",
+    style = "popin 80%",
+})
+
+hl.animation({
+    leaf = "border",
+    enabled = true,
+    speed = 2.5,
+    bezier = "myBezier",
+})
+
+hl.animation({
+    leaf = "fade",
+    enabled = true,
+    speed = 2.5,
+    bezier = "myBezier",
+})
+
+hl.animation({
+    leaf = "workspaces",
+    enabled = true,
+    speed = ${luaNumber(speed, 2.5)},
+    bezier = ${luaString(bezier)},
+    style = ${luaString(workspacesAnimation)},
+})
+
+hl.layer_rule({
+    name = "quickshell-compositor",
+    match = {
+        namespace = "^quickshell$",
+    },
+    no_anim = true,
+    blur = true,
+    blur_popups = true,
+    ignore_alpha = ${ignoreAlphaValue},
+})
+`;
+
+        console.log(
+            `CompositorConfig: Applying ignorealpha: ${ignoreAlphaValue}, explicit: ${Config.compositor.blurExplicitIgnoreAlpha}`
+        );
+        console.log("CompositorConfig: Applying compositor Lua configuration");
+
+        compositorProcess.command = [
+            "hyprctl",
+            "eval",
+            luaConfig
+        ];
         compositorProcess.running = true;
     }
 
@@ -295,9 +435,6 @@ QtObject {
             applyCompositorConfig();
         }
         function onShadowSharpChanged() {
-            applyCompositorConfig();
-        }
-        function onShadowIgnoreWindowChanged() {
             applyCompositorConfig();
         }
         function onShadowColorChanged() {
