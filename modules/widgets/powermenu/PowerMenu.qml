@@ -42,7 +42,7 @@ ActionGrid {
         {
             icon: Icons.logout,
             tooltip: "Logout",
-            command: "hyprctl dispatch exit"
+            command: "hyprctl dispatch 'hl.dsp.exit()'"
         },
         {
             icon: Icons.reboot,

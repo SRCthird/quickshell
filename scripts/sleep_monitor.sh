@@ -18,13 +18,13 @@ get_cmd() {
 		if [ "$type" == "before" ]; then
 			jq -r '.idle.general.before_sleep_cmd // "loginctl lock-session"' "$CONFIG_FILE"
 		else
-			jq -r '.idle.general.after_sleep_cmd // "hyprctl dispatch dpms on"' "$CONFIG_FILE"
+			jq -r '.idle.general.after_sleep_cmd // "hyprctl dispatch ''hl.dsp.dpms({ action = \"enable\" })''"' "$CONFIG_FILE"
 		fi
 	else
 		if [ "$type" == "before" ]; then
 			echo "loginctl lock-session"
 		else
-			echo "hyprctl dispatch dpms on"
+			echo "hyprctl dispatch ''hl.dsp.dpms({ action = \"enable\" })''"
 		fi
 	fi
 }

@@ -13,7 +13,7 @@ Singleton {
     // General Idle Settings
     property string lockCmd: Config.system.idle.general.lock_cmd ?? "qs ipc call lockscreen lock"
     property string beforeSleepCmd: Config.system.idle.general.before_sleep_cmd ?? "loginctl lock-session"
-    property string afterSleepCmd: Config.system.idle.general.after_sleep_cmd ?? "hyprctl dispatch dpms on"
+    property string afterSleepCmd: Config.system.idle.general.after_sleep_cmd ?? "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\""
 
     // Login Lock Daemon
     // Helper script that listens to Lock signal and executes lockCmd from config
