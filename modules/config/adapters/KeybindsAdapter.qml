@@ -430,13 +430,13 @@ JsonAdapter {
         {
           "name": "Display Off on Lid Close",
           "keys": [{ "modifiers": [], "key": "switch:on:Lid Switch" }],
-          "actions": [{ "dispatcher": "exec", "argument": "hyprctl dispatch dpms off", "flags": "l", "layouts": [] }],
+          "actions": [{ "dispatcher": "exec", "argument": "hyprctl dispatch 'hl.dsp.dpms({ action = \"disable\" })'", "flags": "l", "layouts": [] }],
           "enabled": true
         },
         {
           "name": "Display On on Lid Open",
           "keys": [{ "modifiers": [], "key": "switch:off:Lid Switch" }],
-          "actions": [{ "dispatcher": "exec", "argument": "hyprctl dispatch dpms on", "flags": "l", "layouts": [] }],
+          "actions": [{ "dispatcher": "exec", "argument": "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })'", "flags": "l", "layouts": [] }],
           "enabled": true
         },
 
