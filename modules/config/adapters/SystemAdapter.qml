@@ -7,7 +7,7 @@ JsonAdapter {
         property JsonObject general: JsonObject {
             property string lock_cmd: "qs ipc call lockscreen lock"
             property string before_sleep_cmd: "loginctl lock-session"
-            property string after_sleep_cmd: "hyprctl dispatch dpms on"
+            property string after_sleep_cmd: "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })'"
         }
         property list<var> listeners: [
             {
@@ -21,8 +21,8 @@ JsonAdapter {
             },
             {
                 "timeout": 330,
-                "onTimeout": "hyprctl dispatch dpms off",
-                "onResume": "hyprctl dispatch dpms on"
+                "onTimeout": "hyprctl dispatch 'hl.dsp.dpms({ action = \"disable\" })'",
+                "onResume": "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })'"
             },
             {
                 "timeout": 1800,
