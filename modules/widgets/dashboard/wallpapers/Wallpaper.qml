@@ -40,6 +40,12 @@ PanelWindow {
     property alias tintEnabled: wallpaperAdapter.tintEnabled
     property int thumbnailsVersion: 0
 
+    readonly property string lockscreenDir: Quickshell.cachePath("lockscreen")
+    property string pendingLockscreenWallpaper: ""
+    property string lockscreenInputPath: ""
+    property string lockscreenOutputPath: ""
+    property bool lockscreenFrameTimedOut: false
+
     readonly property string safeScreenName: (currentScreenName || "ALL").replace(/[^A-Za-z0-9_.-]/g, "_")
     property string mpvShaderPath: Quickshell.cachePath("mpv_tint_" + safeScreenName + ".glsl")
     property bool mpvShaderReady: false
@@ -56,7 +62,10 @@ PanelWindow {
         onSaved: {
             console.log("MPV tint shader written to:", path);
             wallpaper.mpvShaderReady = true;
-            wallpaper.updateMpvRuntime(true);
+            if (wallpaper.tintEnabled
+                    && wallpaper.getFileType(wallpaper.effectiveWallpaper) === "video") {
+                wallpaper.updateMpvRuntime(true);
+            }
         }
 
         onSaveFailed: error => {
@@ -208,20 +217,59 @@ PanelWindow {
         return filePath;
     }
 
+    function selectPendingLockscreenWallpaper() {
+        if (!pendingLockscreenWallpaper)
+            return false;
+
+        lockscreenInputPath = pendingLockscreenWallpaper;
+        pendingLockscreenWallpaper = "";
+        lockscreenOutputPath = getLockscreenFramePath(lockscreenInputPath);
+
+        return true;
+    }
+
+    function beginLockscreenFrameGeneration() {
+        if (!pendingLockscreenWallpaper)
+            return;
+
+        if (lockscreenMkdirProcess.running
+                || lockscreenCleanupProcess.running
+                || lockscreenFrameProcess.running) {
+            return;
+        }
+
+        if (!selectPendingLockscreenWallpaper())
+            return;
+
+        console.log("Preparing lockscreen frame for:", lockscreenInputPath);
+
+        lockscreenMkdirProcess.exec([
+            "mkdir",
+            "-p",
+            lockscreenDir
+        ]);
+    }
+
     function generateLockscreenFrame(filePath) {
         if (!filePath) {
             console.warn("generateLockscreenFrame: empty filePath");
             return;
         }
 
-        console.log("Generating lockscreen frame for:", filePath);
+        var fileType = getFileType(filePath);
 
-        var scriptPath = decodeURIComponent(Qt.resolvedUrl("../../../../scripts/lockwall.py").toString().replace("file://", ""));
-        var dataPath = Quickshell.cacheDir;
+        if (fileType === "image") {
+            console.log("Lockscreen wallpaper is a static image; no extraction needed");
+            return;
+        }
 
-        lockscreenWallpaperScript.command = ["python3", scriptPath, filePath, dataPath];
+        if (fileType !== "video" && fileType !== "gif") {
+            console.warn("Unsupported lockscreen wallpaper type:", filePath);
+            return;
+        }
 
-        lockscreenWallpaperScript.running = true;
+        pendingLockscreenWallpaper = filePath;
+        beginLockscreenFrameGeneration();
     }
 
     function getSubfolderFromPath(filePath) {
@@ -406,7 +454,7 @@ PanelWindow {
                 matugenProcessNormal.running = false;
             }
 
-            var commandWithConfig = ["matugen", "image", matugenSource, "--source-color-index", "0", "-c", decodeURIComponent(Qt.resolvedUrl("../../../../assets/matugen/config.toml").toString().replace("file://", "")), "-t", wallpaperConfig.adapter.matugenScheme];
+            var commandWithConfig = ["matugen", "image", matugenSource, "--source-color-index", "0", "-c", Quickshell.shellPath("assets/matugen/config.toml"), "-t", wallpaperConfig.adapter.matugenScheme];
             if (Config.theme.lightMode) {
                 commandWithConfig.push("-m", "light");
             }
@@ -756,7 +804,7 @@ PanelWindow {
     Process {
         id: thumbnailGeneratorScript
         running: false
-        command: ["python3", decodeURIComponent(Qt.resolvedUrl("../../../../scripts/thumbgen.py").toString().replace("file://", "")), Quickshell.cachePath("wallpapers.json"), fallbackDir]
+        command: ["python3", Quickshell.shellPath("scripts/thumbgen.py"), Quickshell.cachePath("wallpapers.json"), fallbackDir]
 
         stdout: StdioCollector {
             onStreamFinished: {
@@ -792,32 +840,129 @@ PanelWindow {
     }
 
     Process {
-        id: lockscreenWallpaperScript
+        id: lockscreenMkdirProcess
         running: false
-        command: []
 
-        stdout: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.log("Lockscreen Wallpaper Generator:", text);
-                }
+        onExited: function(exitCode) {
+            if (exitCode !== 0) {
+                console.warn(
+                    "Failed to create lockscreen cache directory, code:",
+                    exitCode
+                );
+
+                Qt.callLater(function() {
+                    wallpaper.beginLockscreenFrameGeneration();
+                });
+                return;
+            }
+
+            lockscreenCleanupProcess.exec([
+                "find",
+                wallpaper.lockscreenDir,
+                "-mindepth", "1",
+                "-maxdepth", "1",
+                "-type", "f",
+                "-delete"
+            ]);
+        }
+    }
+
+    Process {
+        id: lockscreenCleanupProcess
+        running: false
+
+        onExited: function(exitCode) {
+            if (exitCode !== 0) {
+                console.warn(
+                    "Failed to fully clean lockscreen cache, code:",
+                    exitCode
+                );
+            }
+
+            wallpaper.selectPendingLockscreenWallpaper();
+
+            if (!wallpaper.lockscreenInputPath
+                    || !wallpaper.lockscreenOutputPath) {
+                return;
+            }
+
+            console.log(
+                "Extracting lockscreen frame:",
+                wallpaper.lockscreenInputPath,
+                "->",
+                wallpaper.lockscreenOutputPath
+            );
+
+            wallpaper.lockscreenFrameTimedOut = false;
+            lockscreenFrameTimeout.restart();
+
+            lockscreenFrameProcess.exec([
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-nostdin",
+                "-y",
+                "-i", wallpaper.lockscreenInputPath,
+                "-map", "0:v:0",
+                "-frames:v", "1",
+                "-q:v", "2",
+                "-f", "image2",
+                wallpaper.lockscreenOutputPath
+            ]);
+        }
+    }
+
+    Timer {
+        id: lockscreenFrameTimeout
+        interval: 30000
+        repeat: false
+
+        onTriggered: {
+            if (lockscreenFrameProcess.running) {
+                console.warn("Lockscreen frame extraction timed out");
+                wallpaper.lockscreenFrameTimedOut = true;
+                lockscreenFrameProcess.running = false;
             }
         }
+    }
+
+    Process {
+        id: lockscreenFrameProcess
+        running: false
 
         stderr: StdioCollector {
             onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("Lockscreen Wallpaper Generator Error:", text);
-                }
+                var message = text.trim();
+
+                if (message.length > 0)
+                    console.warn("Lockscreen FFmpeg error:", message);
             }
         }
 
-        onExited: function (exitCode) {
-            if (exitCode === 0) {
-                console.log("✅ Lockscreen wallpaper ready");
+        onExited: function(exitCode) {
+            lockscreenFrameTimeout.stop();
+
+            if (wallpaper.lockscreenFrameTimedOut) {
+                console.warn("Lockscreen wallpaper extraction failed: timeout");
+            } else if (exitCode === 0) {
+                console.log(
+                    "Lockscreen wallpaper ready:",
+                    wallpaper.lockscreenOutputPath
+                );
             } else {
-                console.warn("⚠️ Lockscreen wallpaper generation failed with code:", exitCode);
+                console.warn(
+                    "Lockscreen wallpaper extraction failed, code:",
+                    exitCode
+                );
             }
+
+            wallpaper.lockscreenInputPath = "";
+            wallpaper.lockscreenOutputPath = "";
+            wallpaper.lockscreenFrameTimedOut = false;
+
+            Qt.callLater(function() {
+                wallpaper.beginLockscreenFrameGeneration();
+            });
         }
     }
 
@@ -1126,10 +1271,6 @@ PanelWindow {
                 }
             }
             previousSource = source;
-
-            if (source) {
-                var fileType = getFileType(source);
-            }
         }
 
         SequentialAnimation {
