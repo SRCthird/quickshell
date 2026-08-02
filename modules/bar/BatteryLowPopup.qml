@@ -19,8 +19,8 @@ PopupWindow {
          && panel.targetScreen.name === Quickshell.screens[0].name
     grabFocus: false
 
-    width: 260
-    height: 84
+    implicitWidth: 260
+    implicitHeight: 84
 
     anchor.window: panel
 
@@ -29,9 +29,9 @@ PopupWindow {
         case "left":
             return panel.barTargetWidth + panel.barOuterMargin + 12;
         case "right":
-            return panel.width - width - panel.barTargetWidth - panel.barOuterMargin - 12;
+            return panel.width - implicitWidth - panel.barTargetWidth - panel.barOuterMargin - 12;
         default:
-            return Math.round((panel.width - width) / 2);
+            return Math.round((panel.width - implicitWidth) / 2);
         }
     }
 
@@ -40,9 +40,9 @@ PopupWindow {
         case "top":
             return panel.barTargetHeight + panel.barOuterMargin + 12;
         case "bottom":
-            return panel.height - height - panel.barTargetHeight - panel.barOuterMargin - 12;
+            return panel.height - implicitHeight - panel.barTargetHeight - panel.barOuterMargin - 12;
         default:
-            return Math.round((panel.height - height) / 2);
+            return Math.round((panel.height - implicitHeight) / 2);
         }
     }
 
@@ -174,8 +174,8 @@ PopupWindow {
                     clip: true
 
                     Rectangle {
-                        width: parent.width * root.normalizedBattery
-                        height: parent.height
+                        width: parent.implicitWidth * root.normalizedBattery
+                        height: parent.implicitHeight
                         radius: parent.radius
                         color: Styling.srItem("overprimary")
 
