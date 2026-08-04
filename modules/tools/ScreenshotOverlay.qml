@@ -13,19 +13,16 @@ import qs.modules.config
 PanelWindow {
     id: root
 
-    // Screen property to be set by the Loader
     required property var targetScreen
     screen: targetScreen
 
     property string imagePath: ""
 
-    // Position: Bottom Left with margins
     anchors {
         left: true
         bottom: true
     }
 
-    // Width/Height handled by content + margins
     implicitWidth: mainRow.width + 20
     implicitHeight: mainRow.height + 20
 
@@ -43,7 +40,6 @@ PanelWindow {
         }
     }
 
-    // Timer to auto-hide after 5 seconds
     Timer {
         id: hideTimer
         interval: 5000
@@ -52,16 +48,14 @@ PanelWindow {
         onTriggered: root.imagePath = ""
     }
 
-    // MouseArea to detect hover and prevent auto-hide
     MouseArea {
         id: mouseAreaHover
         anchors.fill: parent
         hoverEnabled: true
-        acceptedButtons: Qt.NoButton // Pass clicks through
+        acceptedButtons: Qt.NoButton
         propagateComposedEvents: true
     }
 
-    // Listen for the saved signal from Screenshot service
     Connections {
         target: Screenshot
         function onImageSaved(path) {
@@ -88,11 +82,9 @@ PanelWindow {
         anchors.margins: 20
         spacing: 8
 
-        // Preview Image with Drag Support
         ClippingRectangle {
             id: imgContainer
 
-            // Calculate scale to fit within 250x250 while preserving aspect ratio
             property real maxWidth: 250
             property real maxHeight: 250
             property real imgRatio: img.sourceSize.width / img.sourceSize.height
@@ -127,7 +119,6 @@ PanelWindow {
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
 
-                // Invisible item to handle the Drag attached property state
                 Item {
                     id: dragTarget
                     Drag.active: dragArea.drag.active
@@ -144,14 +135,11 @@ PanelWindow {
                     anchors.fill: parent
                     hoverEnabled: true
 
-                    // Show Grab Hand
                     cursorShape: Qt.DragCopyCursor
                     acceptedButtons: Qt.LeftButton | Qt.MiddleButton
 
-                    // Bind drag target to initiate the drag sequence
                     drag.target: dragTarget
 
-                    // Click to Open (Left) or Delete (Middle)
                     onClicked: mouse => {
                         if (mouse.button === Qt.MiddleButton) {
                             var proc = Qt.createQmlObject('import Quickshell; import Quickshell.Io; Process { }', root);
@@ -164,7 +152,6 @@ PanelWindow {
                     }
                 }
 
-                // Icon overlay on hover (optional, but requested "Icons.handGrab" context)
                 Rectangle {
                     anchors.centerIn: parent
                     width: 32
@@ -181,7 +168,7 @@ PanelWindow {
 
                     Text {
                         anchors.centerIn: parent
-                        text: Icons.handGrab // Assuming this exists per user request
+                        text: Icons.handGrab
                         font.family: Icons.font
                         color: Colors.overBackground
                     }
@@ -189,12 +176,10 @@ PanelWindow {
             }
         }
 
-        // Action Buttons
         Column {
             spacing: 4
             anchors.verticalCenter: parent.verticalCenter
 
-            // Copy
             ActionButton {
                 icon: Icons.copy
                 onTriggered: {
@@ -210,7 +195,7 @@ PanelWindow {
             ActionButton {
                 icon: Icons.disk
                 onTriggered: {
-                    root.imagePath = ""; // Hide overlay
+                    root.imagePath = "";
                 }
                 StyledToolTip {
                     show: parent.containsMouse
@@ -218,23 +203,29 @@ PanelWindow {
                 }
             }
 
-            // Edit
             ActionButton {
                 icon: Icons.edit
                 onTriggered: {
-                    // Open with Gradia (native or Flatpak for Fedora) detached
-                    var proc = Qt.createQmlObject('import Quickshell; import Quickshell.Io; Process { }', root);
-                    proc.command = ["bash", "-c", "if command -v gradia >/dev/null; then gradia \"" + root.imagePath + "\"; else flatpak run be.alexandervanhee.gradia \"" + root.imagePath + "\"; fi & disown"];
-                    proc.running = true;
+                    const imagePath = root.imagePath;
+
+                    if (imagePath === "")
+                        return;
+
+                    Quickshell.execDetached([
+                        "satty",
+                        "--filename", imagePath,
+                        "--output-filename", imagePath
+                    ]);
+
                     root.imagePath = "";
                 }
+
                 StyledToolTip {
                     show: parent.containsMouse
-                    tooltipText: "Edit with Gradia"
+                    tooltipText: "Edit with Satty"
                 }
             }
 
-            // Trash
             ActionButton {
                 icon: Icons.trash
                 hoverVariant: "error"
@@ -255,7 +246,6 @@ PanelWindow {
         }
     }
 
-    // Helper Component for Buttons
     component ActionButton: MouseArea {
         id: btn
         width: 36

@@ -42,13 +42,13 @@ PKGS=(
   libwebp libavif syntax-highlighting breeze-icons hicolor-icon-theme
   brightnessctl ddcutil fontconfig grim slurp imagemagick jq sqlite upower
   wl-clipboard wlsunset wtype zbar glib2 python-pipx zenity inetutils power-profiles-daemon
-  python312 libnotify
+  python libnotify
   tesseract tesseract-data-eng tesseract-data-spa tesseract-data-jpn
   tesseract-data-chi_sim tesseract-data-chi_tra tesseract-data-kor tesseract-data-lat
   ttf-roboto ttf-roboto-mono ttf-dejavu ttf-liberation noto-fonts noto-fonts-cjk noto-fonts-emoji
   ttf-nerd-fonts-symbols
-  matugen gpu-screen-recorder wl-clip-persist mpvpaper gradia
-  quickshell-git ttf-phosphor-icons ttf-league-gothic adw-gtk-theme
+  matugen gpu-screen-recorder wl-clip-persist mpvpaper satty
+  quickshell ttf-phosphor-icons ttf-league-gothic adw-gtk-theme
 )
 
 log_info "Installing dependencies with $AUR_HELPER..."
