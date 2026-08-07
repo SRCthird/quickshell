@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick
+import QtQuick.LocalStorage
 import Quickshell
 import Quickshell.Io
 
@@ -12,10 +13,12 @@ QtObject {
     property var linkPreviewCache: ({})
     property int revision: 0
     property bool _operationInProgress: false
-    
-    readonly property string dbPath: Quickshell.dataPath("clipboard.db")
+    property var _db: null
+
+    readonly property string databaseName: "shell-clipboard"
+    readonly property string databaseVersion: "1.0"
+    readonly property int databaseEstimatedSize: 64 * 1024 * 1024
     readonly property string binaryDataDir: Quickshell.dataPath("clipboard-data")
-    readonly property string schemaPath: Qt.resolvedUrl("clipboard_init.sql").toString().replace("file://", "")
     readonly property string clipboardTempPath: binaryDataDir + "/.clipboard-check.tmp"
 
     property bool _initialized: false
@@ -72,26 +75,6 @@ QtObject {
                         return root._initialized && !SuspendManager.isSuspending;
                     });
                 });
-            }
-        }
-    }
-
-    property Process initDbProcess: Process {
-        running: false
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) console.warn("ClipboardService: DB Init Error: " + text)
-            }
-        }
-
-        onExited: function(code) {
-            if (code === 0) {
-                root._initialized = true;
-                ensureBinaryDataDir();
-                Qt.callLater(root.list);
-            } else {
-                console.warn("ClipboardService: Failed to initialize database (Exit code: " + code + ")");
             }
         }
     }
@@ -249,25 +232,6 @@ QtObject {
         }
     }
 
-    property Process checkAndInsertProcess: Process {
-        running: false
-
-        stderr: StdioCollector {
-            id: clipboardInsertError
-            waitForEnd: true
-        }
-
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            } else {
-                console.warn("ClipboardService: clipboard insert failed with code:", code, clipboardInsertError.text);
-            }
-
-            root._finishClipboardCheck();
-        }
-    }
-
     property Process clipboardCleanupProcess: Process {
         running: false
 
@@ -282,166 +246,6 @@ QtObject {
         }
     }
 
-    property Process listProcess: Process {
-        running: false
-        
-        stdout: StdioCollector {
-            waitForEnd: true
-            
-            onStreamFinished: {
-                var clipboardItems = [];
-                
-                var trimmedText = text.trim();
-                if (trimmedText.length === 0) {
-                    root.items = clipboardItems;
-                    root.listCompleted();
-                    root._operationInProgress = false;
-                    return;
-                }
-                
-                try {
-                    var jsonArray = JSON.parse(trimmedText);
-                    
-                    for (var i = 0; i < jsonArray.length; i++) {
-                        var item = jsonArray[i];
-                        var isFile = item.mime_type === "text/uri-list";
-                        
-                        var preview = item.preview;
-                        if (isFile && item.full_content) {
-                            var uriContent = item.full_content.trim();
-                            if (uriContent.startsWith("file://")) {
-                                var filePath = uriContent.substring(7);
-                                var fileName = filePath.split('/').pop();
-                                fileName = root.decodeUriString(fileName);
-                                preview = "[File] " + fileName;
-                            }
-                        } else if (item.is_image === 1) {
-                            preview = "[Image]";
-                        }
-                        
-                        clipboardItems.push({
-                            id: item.id.toString(),
-                            preview: preview,
-                            fullContent: item.preview,
-                            mime: item.mime_type,
-                            isImage: item.is_image === 1,
-                            isFile: isFile,
-                            binaryPath: item.binary_path || "",
-                            hash: item.content_hash || "",
-                            size: item.size || 0,
-                            createdAt: item.created_at || 0,
-                            pinned: item.pinned === 1,
-                            alias: item.alias || "",
-                            displayIndex: item.display_index !== null ? item.display_index : -1
-                        });
-                    }
-                } catch (e) {
-                    console.warn("ClipboardService: Failed to parse clipboard items:", e);
-                }
-                
-                root.items = clipboardItems;
-                root.listCompleted();
-                root._operationInProgress = false;
-            }
-        }
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: listProcess stderr:", text);
-                }
-            }
-        }
-        
-        onExited: function(code) {
-            if (code !== 0) {
-                root.items = [];
-                root.listCompleted();
-                root._operationInProgress = false;
-            }
-        }
-    }
-
-    property Process insertProcess: Process {
-        property string itemHash: ""
-        property string itemContent: ""
-        property string tmpFile: ""
-        running: false
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: insertProcess stderr:", text);
-                }
-            }
-        }
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            } else {
-                console.warn("ClipboardService: insertProcess failed with code:", code);
-                root._operationInProgress = false;
-            }
-            
-            itemHash = "";
-            itemContent = "";
-            tmpFile = "";
-        }
-    }
-
-    property Process getContentProcess: Process {
-        property string itemId: ""
-        running: false
-        
-        stdout: StdioCollector {
-            waitForEnd: true
-            
-            onStreamFinished: {
-                root.fullContentRetrieved(getContentProcess.itemId, text);
-            }
-        }
-        
-        onExited: function(code) {
-            if (code !== 0) {
-                root.fullContentRetrieved(getContentProcess.itemId, "");
-            }
-        }
-    }
-
-    property Process deleteProcess: Process {
-        property string itemId: ""
-        running: false
-        
-        stdout: StdioCollector {
-            waitForEnd: true
-            
-            onStreamFinished: {
-                var deletedHash = text.trim();
-                if (deletedHash.length > 0) {
-                    clearClipboardIfMatches.deletedHash = deletedHash;
-                    clearClipboardIfMatches.running = true;
-                }
-            }
-        }
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: deleteProcess stderr:", text);
-                }
-            }
-        }
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            } else {
-                root._operationInProgress = false;
-            }
-        }
-    }
-    
     property Process clearClipboardIfMatches: Process {
         property string deletedHash: ""
         running: false
@@ -471,68 +275,17 @@ QtObject {
         }
     }
 
-    property Process clearProcess: Process {
+    property Process clearClipboardProcess: Process {
         running: false
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-                cleanBinaryDataDirProcess.running = true;
-            }
-        }
-    }
-    
-    property Process togglePinProcess: Process {
-        property string itemId: ""
-        running: false
-        
+        command: ["wl-copy", "--clear"]
+
         stderr: StdioCollector {
             onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: togglePinProcess stderr:", text);
+                if (text.length > 0 && !text.includes("No selection")) {
+                    console.warn("ClipboardService: wl-copy --clear stderr:", text);
                 }
             }
         }
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            } else {
-                root._operationInProgress = false;
-            }
-        }
-    }
-    
-    property Process setAliasProcess: Process {
-        property string itemId: ""
-        running: false
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: setAliasProcess stderr:", text);
-                }
-            }
-        }
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            } else {
-                root._operationInProgress = false;
-            }
-        }
-    }
-    
-    property Process cleanBinaryDataDirProcess: Process {
-        running: false
-        command: ["sh", "-c", 
-            "cd '" + binaryDataDir + "' && " +
-            "for f in *; do " +
-            "  [ -f \"$f\" ] || continue; " +
-            "  sqlite3 '" + dbPath + "' \"SELECT COUNT(*) FROM clipboard_items WHERE binary_path = '" + binaryDataDir + "/$f';\" | grep -q '^0$' && rm -f \"$f\"; " +
-            "done"
-        ]
     }
 
     property Process loadImageProcess: Process {
@@ -565,9 +318,164 @@ QtObject {
         }
     }
 
+    function _transaction(context, callback) {
+        if (!root._db) return false;
+
+        try {
+            root._db.transaction(function(tx) {
+                callback(tx);
+            });
+            return true;
+        } catch (e) {
+            console.warn("ClipboardService: database " + context + " failed:", e);
+            return false;
+        }
+    }
+
+    function _initializeSchema() {
+        root._db.transaction(function(tx) {
+            tx.executeSql("PRAGMA busy_timeout = 5000");
+
+            tx.executeSql(
+                "CREATE TABLE IF NOT EXISTS clipboard_items (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                "content_hash TEXT NOT NULL UNIQUE, " +
+                "mime_type TEXT NOT NULL DEFAULT 'text/plain', " +
+                "preview TEXT NOT NULL, " +
+                "full_content TEXT, " +
+                "is_image INTEGER NOT NULL DEFAULT 0, " +
+                "binary_path TEXT, " +
+                "size INTEGER NOT NULL DEFAULT 0, " +
+                "pinned INTEGER NOT NULL DEFAULT 0, " +
+                "alias TEXT, " +
+                "display_index INTEGER, " +
+                "created_at INTEGER NOT NULL, " +
+                "updated_at INTEGER NOT NULL" +
+                ")"
+            );
+
+            tx.executeSql("CREATE INDEX IF NOT EXISTS idx_content_hash ON clipboard_items(content_hash)");
+            tx.executeSql("CREATE INDEX IF NOT EXISTS idx_created_at ON clipboard_items(created_at DESC)");
+            tx.executeSql("CREATE INDEX IF NOT EXISTS idx_is_image ON clipboard_items(is_image)");
+            tx.executeSql("CREATE INDEX IF NOT EXISTS idx_pinned ON clipboard_items(pinned DESC)");
+            tx.executeSql("CREATE INDEX IF NOT EXISTS idx_display_index ON clipboard_items(pinned DESC, display_index ASC)");
+        });
+
+        // FTS is not used by the current UI, but keep the existing schema feature when
+        // the SQLite build behind Qt's QSQLITE driver has FTS5 enabled.
+        try {
+            root._db.transaction(function(tx) {
+                tx.executeSql(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS clipboard_fts USING fts5(" +
+                    "preview, full_content, content=clipboard_items, content_rowid=id)"
+                );
+
+                // Recreate the triggers so old/incorrect trigger definitions cannot linger.
+                tx.executeSql("DROP TRIGGER IF EXISTS clipboard_items_ai");
+                tx.executeSql("DROP TRIGGER IF EXISTS clipboard_items_ad");
+                tx.executeSql("DROP TRIGGER IF EXISTS clipboard_items_au");
+
+                tx.executeSql(
+                    "CREATE TRIGGER clipboard_items_ai AFTER INSERT ON clipboard_items BEGIN " +
+                    "INSERT INTO clipboard_fts(rowid, preview, full_content) " +
+                    "VALUES (new.id, new.preview, new.full_content); END"
+                );
+                tx.executeSql(
+                    "CREATE TRIGGER clipboard_items_ad AFTER DELETE ON clipboard_items BEGIN " +
+                    "INSERT INTO clipboard_fts(clipboard_fts, rowid, preview, full_content) " +
+                    "VALUES ('delete', old.id, old.preview, old.full_content); END"
+                );
+                tx.executeSql(
+                    "CREATE TRIGGER clipboard_items_au AFTER UPDATE ON clipboard_items BEGIN " +
+                    "INSERT INTO clipboard_fts(clipboard_fts, rowid, preview, full_content) " +
+                    "VALUES ('delete', old.id, old.preview, old.full_content); " +
+                    "INSERT INTO clipboard_fts(rowid, preview, full_content) " +
+                    "VALUES (new.id, new.preview, new.full_content); END"
+                );
+
+                // Creating external-content FTS triggers does not index pre-existing rows.
+                tx.executeSql("INSERT INTO clipboard_fts(clipboard_fts) VALUES ('rebuild')");
+            });
+        } catch (e) {
+            console.warn("ClipboardService: FTS5 unavailable; continuing without clipboard_fts:", e);
+        }
+    }
+
+    function _reindexGroup(tx, pinned) {
+        var rows = tx.executeSql(
+            "SELECT id FROM clipboard_items " +
+            "WHERE pinned = ? " +
+            "ORDER BY CASE WHEN display_index IS NULL THEN 1 ELSE 0 END, " +
+            "display_index ASC, updated_at DESC, id DESC",
+            [pinned]
+        );
+
+        for (var i = 0; i < rows.rows.length; i++) {
+            tx.executeSql(
+                "UPDATE clipboard_items SET display_index = ? WHERE id = ?",
+                [i, rows.rows.item(i).id]
+            );
+        }
+    }
+
+    function _reindexUnpinnedByRecency(tx) {
+        var rows = tx.executeSql(
+            "SELECT id FROM clipboard_items WHERE pinned = 0 " +
+            "ORDER BY updated_at DESC, id DESC"
+        );
+
+        for (var i = 0; i < rows.rows.length; i++) {
+            tx.executeSql(
+                "UPDATE clipboard_items SET display_index = ? WHERE id = ?",
+                [i, rows.rows.item(i).id]
+            );
+        }
+    }
+
+    function _removeFilesAsync(paths) {
+        if (!paths || paths.length === 0) return;
+
+        var seen = {};
+        var command = ["rm", "-f", "--"];
+        for (var i = 0; i < paths.length; i++) {
+            var path = String(paths[i] || "");
+            if (path.length === 0 || seen[path]) continue;
+            seen[path] = true;
+            command.push(path);
+        }
+
+        if (command.length === 3) return;
+
+        var proc = Qt.createQmlObject('import Quickshell.Io; Process { running: false }', root);
+        proc.command = command;
+        proc.exited.connect(function(code) {
+            if (code !== 0) {
+                console.warn("ClipboardService: failed to remove stale clipboard data, exit code:", code);
+            }
+            proc.destroy();
+        });
+        proc.running = true;
+    }
+
     function initialize() {
-        initDbProcess.command = ["sh", "-c", "sqlite3 " + dbPath + " < " + schemaPath];
-        initDbProcess.running = true;
+        if (root._initialized || root._db) return;
+
+        try {
+            root._db = LocalStorage.openDatabaseSync(
+                root.databaseName,
+                root.databaseVersion,
+                "Shell Clipboard Database",
+                root.databaseEstimatedSize
+            );
+            root._initializeSchema();
+            root._initialized = true;
+            root.ensureBinaryDataDir();
+            Qt.callLater(root.list);
+        } catch (e) {
+            root._db = null;
+            root._initialized = false;
+            console.warn("ClipboardService: failed to initialize LocalStorage database:", e);
+        }
     }
 
     function ensureBinaryDataDir() {
@@ -735,10 +643,6 @@ QtObject {
         root._insertPendingClipboardItem();
     }
 
-    function _sqlQuote(value) {
-        return "'" + String(value === undefined || value === null ? "" : value).replace(/'/g, "''") + "'";
-    }
-
     function _insertPendingClipboardItem() {
         var item = root._pendingClipboardItem;
         if (!item) {
@@ -747,44 +651,70 @@ QtObject {
         }
 
         var timestamp = Math.floor(Date.now() / 1000) * 1000;
-        var fullContentSql = item.isImage
-            ? "''"
-            : "CAST(readfile(" + _sqlQuote(clipboardTempPath) + ") AS TEXT)";
+        var duplicateBinaryPath = "";
 
-        var sql = [
-            "PRAGMA busy_timeout=5000;",
-            "BEGIN TRANSACTION;",
-            "INSERT INTO clipboard_items",
-            "(content_hash, mime_type, preview, full_content, is_image, binary_path, size, pinned, display_index, created_at, updated_at)",
-            "VALUES (" +
-                _sqlQuote(item.hash) + ", " +
-                _sqlQuote(item.mimeType) + ", " +
-                _sqlQuote(item.preview) + ", " +
-                fullContentSql + ", " +
-                (item.isImage ? "1" : "0") + ", " +
-                _sqlQuote(item.binaryPath) + ", " +
-                Number(item.size || 0) + ", 0, 0, " +
-                timestamp + ", " + timestamp +
-            ")",
-            "ON CONFLICT(content_hash) DO UPDATE SET",
-            "updated_at = " + timestamp + ",",
-            "display_index = 0;",
-            "WITH reindexed AS (",
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY updated_at DESC, id DESC) - 1 AS new_idx",
-            "  FROM clipboard_items WHERE pinned = 0",
-            ")",
-            "UPDATE clipboard_items",
-            "SET display_index = (",
-            "  SELECT new_idx FROM reindexed WHERE reindexed.id = clipboard_items.id",
-            ")",
-            "WHERE pinned = 0;",
-            "COMMIT;"
-        ].join("\n");
+        var ok = root._transaction("insert", function(tx) {
+            var existing = tx.executeSql(
+                "SELECT id, pinned, binary_path FROM clipboard_items WHERE content_hash = ? LIMIT 1",
+                [item.hash]
+            );
 
-        // No shell here: Quickshell passes the database path and SQL directly
-        // as argv entries to sqlite3.
-        checkAndInsertProcess.command = ["sqlite3", dbPath, sql];
-        checkAndInsertProcess.running = true;
+            if (existing.rows.length > 0) {
+                var row = existing.rows.item(0);
+                var isPinned = Number(row.pinned) === 1;
+
+                if (isPinned) {
+                    tx.executeSql(
+                        "UPDATE clipboard_items SET updated_at = ? WHERE id = ?",
+                        [timestamp, row.id]
+                    );
+                } else {
+                    tx.executeSql(
+                        "UPDATE clipboard_items SET updated_at = ?, display_index = 0 WHERE id = ?",
+                        [timestamp, row.id]
+                    );
+                    root._reindexUnpinnedByRecency(tx);
+                }
+
+                if (item.isImage && item.binaryPath && item.binaryPath !== String(row.binary_path || "")) {
+                    duplicateBinaryPath = item.binaryPath;
+                }
+                return;
+            }
+
+            tx.executeSql(
+                "INSERT INTO clipboard_items " +
+                "(content_hash, mime_type, preview, full_content, is_image, binary_path, size, pinned, display_index, created_at, updated_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)",
+                [
+                    item.hash,
+                    item.mimeType,
+                    item.preview,
+                    item.isImage ? "" : item.content,
+                    item.isImage ? 1 : 0,
+                    item.binaryPath,
+                    Number(item.size || 0),
+                    timestamp,
+                    timestamp
+                ]
+            );
+
+            root._reindexUnpinnedByRecency(tx);
+        });
+
+        if (duplicateBinaryPath.length > 0) {
+            root._removeFilesAsync([duplicateBinaryPath]);
+        }
+
+        if (ok) {
+            Qt.callLater(root.list);
+        } else if (item.isImage && item.binaryPath) {
+            // The image has already been moved out of the temp file at this point.
+            // Remove it if the database transaction failed so it cannot become orphaned.
+            root._removeFilesAsync([item.binaryPath]);
+        }
+
+        root._finishClipboardCheck();
     }
 
     function _finishClipboardCheck() {
@@ -813,101 +743,208 @@ QtObject {
         clipboardEnsureDirProcess.running = true;
     }
 
-    property Process writeTmpProcess: Process {
-        property string itemHash: ""
-        property string itemContent: ""
-        running: false
-        
-        stdout: StdioCollector {
-            waitForEnd: true
-            
-            onStreamFinished: { }
-        }
+    function list() {
+        if (!root._initialized || !root._db) return;
+        root._operationInProgress = true;
+
+        var clipboardItems = [];
+        var ok = root._transaction("list", function(tx) {
+            var result = tx.executeSql(
+                "SELECT id, mime_type, preview, " +
+                "CASE WHEN mime_type = 'text/uri-list' THEN full_content ELSE NULL END AS full_content, " +
+                "is_image, binary_path, content_hash, size, created_at, pinned, alias, display_index " +
+                "FROM clipboard_items " +
+                "ORDER BY pinned DESC, display_index ASC, updated_at DESC, id DESC LIMIT 100"
+            );
+
+            for (var i = 0; i < result.rows.length; i++) {
+                var item = result.rows.item(i);
+                var isFile = item.mime_type === "text/uri-list";
+                var isImage = Number(item.is_image) === 1;
+
+                var preview = String(item.preview || "");
+                if (isFile && item.full_content) {
+                    var uriContent = String(item.full_content).trim();
+                    if (uriContent.startsWith("file://")) {
+                        var filePath = uriContent.substring(7);
+                        var fileName = filePath.split('/').pop();
+                        fileName = root.decodeUriString(fileName);
+                        preview = "[File] " + fileName;
+                    }
+                } else if (isImage) {
+                    preview = "[Image]";
+                }
+
+                clipboardItems.push({
+                    id: String(item.id),
+                    preview: preview,
+                    fullContent: String(item.preview || ""),
+                    mime: String(item.mime_type || "text/plain"),
+                    isImage: isImage,
+                    isFile: isFile,
+                    binaryPath: String(item.binary_path || ""),
+                    hash: String(item.content_hash || ""),
+                    size: Number(item.size || 0),
+                    createdAt: Number(item.created_at || 0),
+                    pinned: Number(item.pinned) === 1,
+                    alias: String(item.alias || ""),
+                    displayIndex: item.display_index !== null && item.display_index !== undefined
+                        ? Number(item.display_index)
+                        : -1
+                });
+            }
+        });
+
+        root.items = ok ? clipboardItems : [];
+        root.listCompleted();
+        root._operationInProgress = false;
     }
 
-    function list() {
-        if (!_initialized) return;
-        _operationInProgress = true;
-        listProcess.command = ["sh", "-c", 
-            "sqlite3 '" + dbPath + "' <<'EOSQL'\n.timeout 5000\n.mode json\nSELECT id, mime_type, preview, full_content, is_image, binary_path, content_hash, size, created_at, pinned, alias, display_index FROM clipboard_items ORDER BY pinned DESC, display_index ASC, updated_at DESC, id DESC LIMIT 100;\nEOSQL"
-        ];
-        listProcess.running = true;
+    function getFullContentValue(id) {
+        if (!root._initialized || !root._db) return "";
+
+        var content = "";
+        root._transaction("get content", function(tx) {
+            var result = tx.executeSql(
+                "SELECT full_content FROM clipboard_items WHERE id = ? LIMIT 1",
+                [id]
+            );
+            if (result.rows.length > 0) {
+                var value = result.rows.item(0).full_content;
+                content = value === null || value === undefined ? "" : String(value);
+            }
+        });
+        return content;
     }
 
     function getFullContent(id) {
-        if (!_initialized) return;
-        getContentProcess.itemId = id;
-        getContentProcess.command = ["sh", "-c", "sqlite3 '" + dbPath + "' '.timeout 5000' 'SELECT full_content FROM clipboard_items WHERE id = " + id + ";'"];
-        getContentProcess.running = true;
+        if (!root._initialized) return;
+
+        var itemId = String(id);
+        var content = root.getFullContentValue(id);
+        Qt.callLater(function() {
+            root.fullContentRetrieved(itemId, content);
+        });
     }
 
     function deleteItem(id) {
-        if (!_initialized) return;
-        _operationInProgress = true;
-        deleteProcess.itemId = id;
-        
-        deleteProcess.command = ["sh", "-c", 
-            "HASH=$(sqlite3 '" + dbPath + "' '.timeout 5000' 'SELECT content_hash FROM clipboard_items WHERE id = " + id + ";'); " +
-            "sqlite3 '" + dbPath + "' '.timeout 5000' 'DELETE FROM clipboard_items WHERE id = " + id + ";'; " +
-            "echo \"$HASH\""
-        ];
-        deleteProcess.running = true;
+        if (!root._initialized || !root._db) return;
+        root._operationInProgress = true;
+
+        var deletedHash = "";
+        var deletedBinaryPath = "";
+
+        var ok = root._transaction("delete item", function(tx) {
+            var result = tx.executeSql(
+                "SELECT content_hash, binary_path, pinned FROM clipboard_items WHERE id = ? LIMIT 1",
+                [id]
+            );
+
+            if (result.rows.length === 0) return;
+
+            var row = result.rows.item(0);
+            deletedHash = String(row.content_hash || "");
+            deletedBinaryPath = String(row.binary_path || "");
+            var pinned = Number(row.pinned) === 1 ? 1 : 0;
+
+            tx.executeSql("DELETE FROM clipboard_items WHERE id = ?", [id]);
+            root._reindexGroup(tx, pinned);
+        });
+
+        if (!ok) {
+            root._operationInProgress = false;
+            return;
+        }
+
+        if (deletedBinaryPath.length > 0) {
+            root._removeFilesAsync([deletedBinaryPath]);
+        }
+
+        if (deletedHash.length > 0) {
+            clearClipboardIfMatches.deletedHash = deletedHash;
+            clearClipboardIfMatches.running = true;
+        }
+
+        Qt.callLater(root.list);
     }
 
     function clear() {
-        if (!_initialized) return;
-        clearProcess.command = ["sh", "-c", 
-            "sqlite3 '" + dbPath + "' '.timeout 5000' 'DELETE FROM clipboard_items WHERE pinned = 0;'; " +
-            "wl-copy --clear 2>/dev/null || true"
-        ];
-        clearProcess.running = true;
+        if (!root._initialized || !root._db) return;
+
+        var binaryPaths = [];
+        var ok = root._transaction("clear history", function(tx) {
+            var result = tx.executeSql(
+                "SELECT binary_path FROM clipboard_items " +
+                "WHERE pinned = 0 AND binary_path IS NOT NULL AND binary_path <> ''"
+            );
+
+            for (var i = 0; i < result.rows.length; i++) {
+                binaryPaths.push(String(result.rows.item(i).binary_path || ""));
+            }
+
+            tx.executeSql("DELETE FROM clipboard_items WHERE pinned = 0");
+        });
+
+        if (!ok) return;
+
+        root._removeFilesAsync(binaryPaths);
+        clearClipboardProcess.running = true;
+        Qt.callLater(root.list);
     }
 
     function togglePin(id) {
-        if (!_initialized) return;
-        _operationInProgress = true;
-        togglePinProcess.itemId = id;
-        togglePinProcess.command = ["sh", "-c", 
-            "sqlite3 '" + dbPath + "' <<'EOSQL'\n" +
-            ".timeout 5000\n" +
-            "BEGIN TRANSACTION;\n" +
-            "-- Toggle pin status\n" +
-            "UPDATE clipboard_items SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = " + id + ";\n" +
-            "-- Get new pinned status\n" +
-            "-- If item is now pinned (pinned=1), set its index to 0 and shift others\n" +
-            "-- If item is now unpinned (pinned=0), set its index to 0 and shift others\n" +
-            "UPDATE clipboard_items SET display_index = CASE \n" +
-            "  WHEN id = " + id + " THEN 0\n" +
-            "  ELSE display_index + 1\n" +
-            "END WHERE pinned = (SELECT pinned FROM clipboard_items WHERE id = " + id + ");\n" +
-            "-- Compact indices to remove gaps for both pinned and unpinned\n" +
-            "WITH reindexed_pinned AS (\n" +
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY display_index ASC, updated_at DESC, id DESC) - 1 AS new_idx\n" +
-            "  FROM clipboard_items WHERE pinned = 1\n" +
-            ")\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT new_idx FROM reindexed_pinned WHERE reindexed_pinned.id = clipboard_items.id) WHERE pinned = 1;\n" +
-            "WITH reindexed_unpinned AS (\n" +
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY display_index ASC, updated_at DESC, id DESC) - 1 AS new_idx\n" +
-            "  FROM clipboard_items WHERE pinned = 0\n" +
-            ")\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT new_idx FROM reindexed_unpinned WHERE reindexed_unpinned.id = clipboard_items.id) WHERE pinned = 0;\n" +
-            "COMMIT;\n" +
-            "EOSQL"
-        ];
-        togglePinProcess.running = true;
+        if (!root._initialized || !root._db) return;
+        root._operationInProgress = true;
+
+        var ok = root._transaction("toggle pin", function(tx) {
+            var result = tx.executeSql(
+                "SELECT pinned FROM clipboard_items WHERE id = ? LIMIT 1",
+                [id]
+            );
+            if (result.rows.length === 0) return;
+
+            var oldPinned = Number(result.rows.item(0).pinned) === 1 ? 1 : 0;
+            var newPinned = oldPinned === 1 ? 0 : 1;
+
+            tx.executeSql(
+                "UPDATE clipboard_items " +
+                "SET display_index = COALESCE(display_index, 0) + 1 " +
+                "WHERE pinned = ? AND id <> ?",
+                [newPinned, id]
+            );
+            tx.executeSql(
+                "UPDATE clipboard_items SET pinned = ?, display_index = 0 WHERE id = ?",
+                [newPinned, id]
+            );
+
+            root._reindexGroup(tx, oldPinned);
+            root._reindexGroup(tx, newPinned);
+        });
+
+        if (ok) {
+            Qt.callLater(root.list);
+        } else {
+            root._operationInProgress = false;
+        }
     }
 
     function setAlias(id, alias) {
-        if (!_initialized) return;
-        _operationInProgress = true;
-        setAliasProcess.itemId = id;
-        var escapedAlias = alias.replace(/'/g, "''");
-        if (alias.trim() === "") {
-            setAliasProcess.command = ["sh", "-c", "sqlite3 '" + dbPath + "' '.timeout 5000' 'UPDATE clipboard_items SET alias = NULL WHERE id = " + id + ";'"];
+        if (!root._initialized || !root._db) return;
+        root._operationInProgress = true;
+
+        var normalizedAlias = String(alias || "").trim();
+        var ok = root._transaction("set alias", function(tx) {
+            tx.executeSql(
+                "UPDATE clipboard_items SET alias = ? WHERE id = ?",
+                [normalizedAlias.length === 0 ? null : normalizedAlias, id]
+            );
+        });
+
+        if (ok) {
+            Qt.callLater(root.list);
         } else {
-            setAliasProcess.command = ["sh", "-c", "sqlite3 '" + dbPath + "' '.timeout 5000' \"UPDATE clipboard_items SET alias = '" + escapedAlias + "' WHERE id = " + id + ";\""];
+            root._operationInProgress = false;
         }
-        setAliasProcess.running = true;
     }
 
     function decodeToDataUrl(id, mime) {
@@ -1441,147 +1478,135 @@ QtObject {
         }
     }
 
+    function _orderedGroupIds(tx, pinned) {
+        var result = tx.executeSql(
+            "SELECT id FROM clipboard_items WHERE pinned = ? " +
+            "ORDER BY CASE WHEN display_index IS NULL THEN 1 ELSE 0 END, " +
+            "display_index ASC, updated_at DESC, id DESC",
+            [pinned]
+        );
+
+        var ids = [];
+        for (var i = 0; i < result.rows.length; i++) {
+            ids.push(String(result.rows.item(i).id));
+        }
+        return ids;
+    }
+
+    function _writeGroupOrder(tx, ids) {
+        for (var i = 0; i < ids.length; i++) {
+            tx.executeSql(
+                "UPDATE clipboard_items SET display_index = ? WHERE id = ?",
+                [i, ids[i]]
+            );
+        }
+    }
+
     function reorderItem(itemId, newIndex) {
-        if (!_initialized) return;
+        if (!root._initialized || !root._db) return;
+
         var item = null;
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].id === itemId) {
-                item = items[i];
+        for (var i = 0; i < root.items.length; i++) {
+            if (root.items[i].id === String(itemId)) {
+                item = root.items[i];
                 break;
             }
         }
-        
         if (!item) return;
-        var isPinned = item.pinned ? 1 : 0;
-        if (newIndex < 0) newIndex = 0;
-        reorderProcess.command = ["sh", "-c", 
-            "sqlite3 '" + dbPath + "' <<'EOSQL'\n" +
-            ".timeout 5000\n" +
-            "BEGIN TRANSACTION;\n" +
-            "-- Shift other items to make room\n" +
-            "UPDATE clipboard_items SET display_index = display_index + 1 WHERE pinned = " + isPinned + " AND display_index >= " + newIndex + " AND id != " + itemId + ";\n" +
-            "-- Set new index for target item\n" +
-            "UPDATE clipboard_items SET display_index = " + newIndex + " WHERE id = " + itemId + ";\n" +
-            "-- Compact indices to remove gaps\n" +
-            "WITH reindexed AS (\n" +
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY display_index ASC, updated_at DESC, id DESC) - 1 AS new_idx\n" +
-            "  FROM clipboard_items WHERE pinned = " + isPinned + "\n" +
-            ")\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT new_idx FROM reindexed WHERE reindexed.id = clipboard_items.id) WHERE pinned = " + isPinned + ";\n" +
-            "COMMIT;\n" +
-            "EOSQL"
-        ];
-        reorderProcess.running = true;
+
+        var pinned = item.pinned ? 1 : 0;
+        var targetId = String(itemId);
+        var ok = root._transaction("reorder item", function(tx) {
+            var ids = root._orderedGroupIds(tx, pinned);
+            var oldIndex = ids.indexOf(targetId);
+            if (oldIndex < 0) return;
+
+            ids.splice(oldIndex, 1);
+            var targetIndex = Math.max(0, Math.min(Number(newIndex) || 0, ids.length));
+            ids.splice(targetIndex, 0, targetId);
+            root._writeGroupOrder(tx, ids);
+        });
+
+        if (ok) Qt.callLater(root.list);
     }
-    
+
     function moveItemUp(itemId) {
         var item = null;
         var currentIdx = -1;
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].id === itemId) {
-                item = items[i];
+        for (var i = 0; i < root.items.length; i++) {
+            if (root.items[i].id === String(itemId)) {
+                item = root.items[i];
                 currentIdx = i;
                 break;
             }
         }
-        
-        if (!item || currentIdx < 0) return;
-        if (currentIdx === 0) return;
-        var prevItem = items[currentIdx - 1];
+
+        if (!item || currentIdx <= 0) return;
+        var prevItem = root.items[currentIdx - 1];
         if (prevItem.pinned !== item.pinned) return;
-        var temp = items[currentIdx];
-        items[currentIdx] = items[currentIdx - 1];
-        items[currentIdx - 1] = temp;
-        listCompleted();
-        swapItems(itemId, prevItem.id);
+
+        var temp = root.items[currentIdx];
+        root.items[currentIdx] = root.items[currentIdx - 1];
+        root.items[currentIdx - 1] = temp;
+        root.listCompleted();
+        root.swapItems(itemId, prevItem.id);
     }
-    
+
     function moveItemDown(itemId) {
         var item = null;
         var currentIdx = -1;
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].id === itemId) {
-                item = items[i];
+        for (var i = 0; i < root.items.length; i++) {
+            if (root.items[i].id === String(itemId)) {
+                item = root.items[i];
                 currentIdx = i;
                 break;
             }
         }
-        
-        if (!item || currentIdx < 0) return;
-        if (currentIdx >= items.length - 1) return;
-        var nextItem = items[currentIdx + 1];
-        if (nextItem.pinned !== item.pinned) return;
-        var temp = items[currentIdx];
-        items[currentIdx] = items[currentIdx + 1];
-        items[currentIdx + 1] = temp;
-        listCompleted();
-        swapItems(itemId, nextItem.id);
-    }
-    
-    function swapItems(itemId1, itemId2) {
-        if (!_initialized) return;
-        
-        var cmd = "sqlite3 '" + dbPath + "' <<'EOSQL'\n" +
-            ".timeout 5000\n" +
-            "BEGIN TRANSACTION;\n" +
-            "-- Reindex to ensure unique indices\n" +
-            "WITH reindexed_pinned AS (\n" +
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY display_index ASC, updated_at DESC, id DESC) - 1 AS new_idx\n" +
-            "  FROM clipboard_items WHERE pinned = 1\n" +
-            ")\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT new_idx FROM reindexed_pinned WHERE reindexed_pinned.id = clipboard_items.id) WHERE pinned = 1;\n" +
-            "WITH reindexed_unpinned AS (\n" +
-            "  SELECT id, ROW_NUMBER() OVER (ORDER BY display_index ASC, updated_at DESC, id DESC) - 1 AS new_idx\n" +
-            "  FROM clipboard_items WHERE pinned = 0\n" +
-            ")\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT new_idx FROM reindexed_unpinned WHERE reindexed_unpinned.id = clipboard_items.id) WHERE pinned = 0;\n" +
-            "-- Create temp variables for the swap\n" +
-            "CREATE TEMP TABLE IF NOT EXISTS swap_temp (idx1 INTEGER, idx2 INTEGER);\n" +
-            "DELETE FROM swap_temp;\n" +
-            "INSERT INTO swap_temp (idx1, idx2) \n" +
-            "  SELECT \n" +
-            "    (SELECT display_index FROM clipboard_items WHERE id = " + itemId1 + "),\n" +
-            "    (SELECT display_index FROM clipboard_items WHERE id = " + itemId2 + ");\n" +
-            "-- Perform the swap\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT idx2 FROM swap_temp) WHERE id = " + itemId1 + ";\n" +
-            "UPDATE clipboard_items SET display_index = (SELECT idx1 FROM swap_temp) WHERE id = " + itemId2 + ";\n" +
-            "-- Clean up\n" +
-            "DELETE FROM swap_temp;\n" +
-            "COMMIT;\n" +
-            "EOSQL";
-            
-        var proc = Qt.createQmlObject('import Quickshell.Io; Process {}', root);
-        proc.command = ["sh", "-c", cmd];
-        
-        proc.onExited.connect(function(code) {
-             if (code === 0) {
-                 Qt.callLater(root.list);
-             } else {
-                 console.warn("ClipboardService: dynamic swapProcess failed with code:", code);
-             }
-             proc.destroy();
-        });
-        
-        proc.running = true;
-    }
-    
 
-    property Process reorderProcess: Process {
-        running: false
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: reorderProcess stderr:", text);
-                }
+        if (!item || currentIdx < 0 || currentIdx >= root.items.length - 1) return;
+        var nextItem = root.items[currentIdx + 1];
+        if (nextItem.pinned !== item.pinned) return;
+
+        var temp = root.items[currentIdx];
+        root.items[currentIdx] = root.items[currentIdx + 1];
+        root.items[currentIdx + 1] = temp;
+        root.listCompleted();
+        root.swapItems(itemId, nextItem.id);
+    }
+
+    function swapItems(itemId1, itemId2) {
+        if (!root._initialized || !root._db) return;
+
+        var id1 = String(itemId1);
+        var id2 = String(itemId2);
+        var ok = root._transaction("swap items", function(tx) {
+            var result = tx.executeSql(
+                "SELECT id, pinned FROM clipboard_items WHERE id IN (?, ?)",
+                [itemId1, itemId2]
+            );
+            if (result.rows.length !== 2) return;
+
+            var pinned1 = null;
+            var pinned2 = null;
+            for (var i = 0; i < result.rows.length; i++) {
+                var row = result.rows.item(i);
+                if (String(row.id) === id1) pinned1 = Number(row.pinned) === 1 ? 1 : 0;
+                if (String(row.id) === id2) pinned2 = Number(row.pinned) === 1 ? 1 : 0;
             }
-        }
-        
-        onExited: function(code) {
-            if (code === 0) {
-                Qt.callLater(root.list);
-            }
-        }
+            if (pinned1 === null || pinned2 === null || pinned1 !== pinned2) return;
+
+            var ids = root._orderedGroupIds(tx, pinned1);
+            var index1 = ids.indexOf(id1);
+            var index2 = ids.indexOf(id2);
+            if (index1 < 0 || index2 < 0) return;
+
+            var temp = ids[index1];
+            ids[index1] = ids[index2];
+            ids[index2] = temp;
+            root._writeGroupOrder(tx, ids);
+        });
+
+        if (ok) Qt.callLater(root.list);
     }
 
     property Process emojiTypeProcess: Process {
