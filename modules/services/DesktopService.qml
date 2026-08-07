@@ -14,6 +14,16 @@ Singleton {
     property int maxColumnsHint: 10
     property bool gridReady: false
     property bool positionsLoaded: false
+    property bool desktopScanComplete: false
+    property bool thumbnailRunPending: false
+    property bool thumbnailGenerationActive: false
+    property var thumbnailQueue: []
+    property int thumbnailQueueIndex: 0
+    property var currentThumbnailJob: null
+    property int thumbnailsGenerated: 0
+
+    readonly property var thumbnailVideoExtensions: ["mp4", "webm", "mov", "avi", "mkv", "gif"]
+    readonly property var thumbnailImageExtensions: ["jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"]
 
     onMaxRowsHintChanged: checkGridReady()
     onMaxColumnsHintChanged: checkGridReady()
@@ -23,10 +33,11 @@ Singleton {
         if (maxRowsHint > 0 && maxColumnsHint > 0 && positionsLoaded && !gridReady) {
             gridReady = true;
             console.log("Grid ready - rows:", maxRowsHint, "cols:", maxColumnsHint);
-            if (tempItems.length > 0 || tempDesktopFiles.length > 0) {
-                console.log("Finalizing items with", tempItems.length + tempDesktopFiles.length, "items");
-                finalizeItems();
-            }
+        }
+
+        if (gridReady && positionsLoaded && desktopScanComplete && !parsingInProgress && !initialLoadComplete) {
+            console.log("Finalizing initial desktop with", tempItems.length + tempDesktopFiles.length, "items");
+            finalizeItems();
         }
     }
 
@@ -98,9 +109,159 @@ Singleton {
         getDesktopDirProcess.running = true;
     }
 
+    function getThumbnailExtension(fileName) {
+        var dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex === fileName.length - 1) {
+            return "";
+        }
+        return fileName.substring(dotIndex + 1).toLowerCase();
+    }
+
+    function getThumbnailKind(fileName) {
+        var ext = getThumbnailExtension(fileName);
+        if (thumbnailVideoExtensions.includes(ext)) {
+            return "video";
+        }
+        if (thumbnailImageExtensions.includes(ext)) {
+            return "image";
+        }
+        return "";
+    }
+
+    function getThumbnailPath(fileName) {
+        return Quickshell.cachePath("desktop_thumbnails/" + fileName + ".jpg");
+    }
+
+    function getThumbnailCommand(job) {
+        if (job.kind === "video") {
+            return [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", job.source,
+                "-ss", "00:00:01",
+                "-vframes", "1",
+                "-vf", "scale=64:64:force_original_aspect_ratio=increase,crop=64:64",
+                "-q:v", "2",
+                "-f", "image2",
+                job.thumbnail
+            ];
+        }
+
+        return [
+            "convert", job.source,
+            "-resize", "64x64^",
+            "-gravity", "center",
+            "-extent", "64x64",
+            "-quality", "85",
+            job.thumbnail
+        ];
+    }
+
     function generateThumbnails() {
-        if (desktopDir) {
-            thumbnailProcess.running = true;
+        if (!desktopDir) {
+            return;
+        }
+
+        if (!initialLoadComplete || parsingInProgress || scanProcess.running) {
+            thumbnailRunPending = true;
+            if (initialLoadComplete) {
+                thumbnailTimer.restart();
+            }
+            return;
+        }
+
+        if (thumbnailGenerationActive) {
+            thumbnailRunPending = true;
+            return;
+        }
+
+        thumbnailGenerationActive = true;
+        thumbnailRunPending = false;
+        thumbnailQueue = [];
+        thumbnailQueueIndex = 0;
+        currentThumbnailJob = null;
+        thumbnailsGenerated = 0;
+
+        for (var i = 0; i < items.count; i++) {
+            var item = items.get(i);
+            if (item.isPlaceholder || item.isDesktopFile || item.type === "folder" || !item.path) {
+                continue;
+            }
+
+            var kind = getThumbnailKind(item.name);
+            if (!kind) {
+                continue;
+            }
+
+            thumbnailQueue.push({
+                source: item.path,
+                thumbnail: getThumbnailPath(item.name),
+                kind: kind
+            });
+        }
+
+        if (thumbnailQueue.length === 0) {
+            finishThumbnailGeneration();
+            return;
+        }
+
+        thumbnailSetupProcess.exec(["mkdir", "-p", Quickshell.cachePath("desktop_thumbnails")]);
+    }
+
+    function checkNextThumbnail() {
+        if (!thumbnailGenerationActive) {
+            return;
+        }
+
+        if (thumbnailQueueIndex >= thumbnailQueue.length) {
+            finishThumbnailGeneration();
+            return;
+        }
+
+        currentThumbnailJob = thumbnailQueue[thumbnailQueueIndex];
+
+        thumbnailFreshnessProcess.exec([
+            "test",
+            currentThumbnailJob.source,
+            "-nt",
+            currentThumbnailJob.thumbnail
+        ]);
+    }
+
+    function generateCurrentThumbnail() {
+        if (!currentThumbnailJob) {
+            advanceThumbnailQueue();
+            return;
+        }
+
+        thumbnailProcess.exec(getThumbnailCommand(currentThumbnailJob));
+    }
+
+    function advanceThumbnailQueue() {
+        thumbnailQueueIndex++;
+        currentThumbnailJob = null;
+        Qt.callLater(checkNextThumbnail);
+    }
+
+    function finishThumbnailGeneration() {
+        var generatedCount = thumbnailsGenerated;
+
+        thumbnailGenerationActive = false;
+        thumbnailQueue = [];
+        thumbnailQueueIndex = 0;
+        currentThumbnailJob = null;
+        thumbnailsGenerated = 0;
+
+        if (generatedCount > 0) {
+            console.log("Thumbnail generation complete:", generatedCount, "generated");
+
+            // Image delegates may have resolved their source before the JPEG
+            // existed. Rebuilding the model makes them resolve it again.
+            Qt.callLater(scanDesktop);
+        }
+
+        if (thumbnailRunPending) {
+            thumbnailRunPending = false;
+            thumbnailTimer.restart();
         }
     }
 
@@ -473,6 +634,8 @@ Singleton {
                 if (!parsingInProgress) {
                     tempDesktopFiles = pendingDesktopFiles;
                     tempItems = newItems;
+                    desktopScanComplete = true;
+                    checkGridReady();
 
                     if (pendingDesktopFiles.length > 0) {
                         parsingInProgress = true;
@@ -662,22 +825,69 @@ Singleton {
     }
 
     Process {
-        id: thumbnailProcess
+        id: thumbnailSetupProcess
         running: false
-        command: ["python3", decodeURIComponent(Qt.resolvedUrl("../../scripts/desktop_thumbgen.py").toString().replace("file://", "")), desktopDir, Quickshell.cachePath("desktop_thumbnails")]
+        command: []
 
-        stdout: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.log("Thumbnail generation:", text);
-                }
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                console.warn("Could not create thumbnail cache directory");
+                root.finishThumbnailGeneration();
+                return;
             }
+            Qt.callLater(root.checkNextThumbnail);
         }
 
         stderr: StdioCollector {
             onStreamFinished: {
                 if (text.length > 0) {
-                    console.log("Thumbnail generation output:", text);
+                    console.warn("Thumbnail cache setup error:", text);
+                }
+            }
+        }
+    }
+
+    Process {
+        id: thumbnailFreshnessProcess
+        running: false
+        command: []
+
+        onExited: (exitCode, exitStatus) => {
+            if (!root.thumbnailGenerationActive) {
+                return;
+            }
+
+            if (exitCode === 0) {
+                root.generateCurrentThumbnail();
+            } else {
+                root.advanceThumbnailQueue();
+            }
+        }
+    }
+
+    Process {
+        id: thumbnailProcess
+        running: false
+        command: []
+
+        onExited: (exitCode, exitStatus) => {
+            if (!root.thumbnailGenerationActive || !root.currentThumbnailJob) {
+                return;
+            }
+
+            if (exitCode === 0) {
+                root.thumbnailsGenerated++;
+            } else {
+                console.warn("Thumbnail failed:", root.currentThumbnailJob.source, "exit code:", exitCode);
+            }
+
+            root.advanceThumbnailQueue();
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.length > 0) {
+                    console.warn("Thumbnail generator output:", text);
                 }
             }
         }
@@ -693,6 +903,12 @@ Singleton {
     onDesktopDirChanged: {
         if (desktopDir) {
             thumbnailTimer.running = true;
+        }
+    }
+
+    onInitialLoadCompleteChanged: {
+        if (initialLoadComplete && thumbnailRunPending && !thumbnailGenerationActive) {
+            thumbnailTimer.restart();
         }
     }
 }
