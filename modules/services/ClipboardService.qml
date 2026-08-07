@@ -16,17 +16,16 @@ QtObject {
     readonly property string dbPath: Quickshell.dataPath("clipboard.db")
     readonly property string binaryDataDir: Quickshell.dataPath("clipboard-data")
     readonly property string schemaPath: Qt.resolvedUrl("clipboard_init.sql").toString().replace("file://", "")
-    readonly property string insertScriptPath: Qt.resolvedUrl("../../scripts/clipboard_insert.sh").toString().replace("file://", "")
-    readonly property string checkScriptPath: Qt.resolvedUrl("../../scripts/clipboard_check.sh").toString().replace("file://", "")
-    readonly property string watchScriptPath: Qt.resolvedUrl("../../scripts/clipboard_watch.sh").toString().replace("file://", "")
-    readonly property string linkPreviewScriptPath: Qt.resolvedUrl("../../scripts/link_preview.py").toString().replace("file://", "")
+    readonly property string clipboardTempPath: binaryDataDir + "/.clipboard-check.tmp"
 
     property bool _initialized: false
+    property bool _clipboardCheckPending: false
+    property bool _clipboardCheckRunning: false
+    property var _pendingClipboardItem: null
 
     property var suspendConnections: Connections {
         target: SuspendManager
         function onWakingUp() {
-            // Small delay to allow wl-paste to work again after wake
             wakeRestartTimer.restart();
         }
     }
@@ -38,52 +37,45 @@ QtObject {
         onTriggered: {
             if (root._initialized) {
                 root.list();
-                clipboardWatcher.running = true;
+                root.checkClipboard();
             }
         }
     }
 
     signal listCompleted()
 
-    // Clipboard watcher using custom script that monitors changes
     property Process clipboardWatcher: Process {
         running: root._initialized && !SuspendManager.isSuspending
-        command: [watchScriptPath, checkScriptPath, dbPath, insertScriptPath, binaryDataDir]
-        
-        stdout: StdioCollector {
-            onStreamFinished: {
-                // When watcher outputs something, refresh the list
-                var lines = text.trim().split('\n');
-                for (var i = 0; i < lines.length; i++) {
-                    if (lines[i] === "REFRESH_LIST") {
-                        Qt.callLater(root.list);
-                    }
+        command: ["wl-paste", "--watch", "bash", "-c", "cat >/dev/null; printf 'CHANGED\\n'"]
+
+        stdout: SplitParser {
+            onRead: data => {
+                if (data.trim() === "CHANGED") {
+                    root.checkClipboard();
                 }
             }
         }
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0 && !text.includes("No selection")) {
-                    console.warn("ClipboardService: watcher stderr:", text);
+
+        stderr: SplitParser {
+            onRead: data => {
+                if (data.length > 0 && !data.includes("No selection")) {
+                    console.warn("ClipboardService: watcher stderr:", data);
                 }
             }
         }
-        
+
         onExited: function(code) {
-            // Watcher should keep running, restart if it exits (unless suspending)
             if (root._initialized && !SuspendManager.isSuspending) {
                 console.warn("ClipboardService: watcher exited with code:", code, "- restarting...");
                 Qt.callLater(function() {
-                    if (root._initialized && !SuspendManager.isSuspending) {
-                        clipboardWatcher.running = true;
-                    }
+                    clipboardWatcher.running = Qt.binding(function() {
+                        return root._initialized && !SuspendManager.isSuspending;
+                    });
                 });
             }
         }
     }
 
-    // Initialize database
     property Process initDbProcess: Process {
         running: false
         
@@ -108,27 +100,188 @@ QtObject {
         running: false
     }
 
-    // Single process to check and insert clipboard content (used for manual checks)
-    property Process checkAndInsertProcess: Process {
+    property Process clipboardEnsureDirProcess: Process {
         running: false
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0 && !text.includes("No selection")) {
-                    console.warn("ClipboardService: checkAndInsertProcess stderr:", text);
-                }
-            }
-        }
-        
+
         onExited: function(code) {
-            _operationInProgress = false;
             if (code === 0) {
-                Qt.callLater(root.list);
+                clipboardTypesProcess.command = ["wl-paste", "--list-types"];
+                clipboardTypesProcess.running = true;
+            } else {
+                console.warn("ClipboardService: failed to ensure clipboard data directory:", code);
+                root._finishClipboardCheck();
             }
         }
     }
 
-    // List all items from database
+    property Process clipboardTypesProcess: Process {
+        running: false
+
+        stdout: StdioCollector {
+            id: clipboardTypesOutput
+            waitForEnd: true
+        }
+
+        stderr: StdioCollector {
+            id: clipboardTypesError
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (code !== 0) {
+                if (clipboardTypesError.text.length > 0 && !clipboardTypesError.text.includes("No selection")) {
+                    console.warn("ClipboardService: wl-paste --list-types failed:", clipboardTypesError.text);
+                }
+                root._finishClipboardCheck();
+                return;
+            }
+
+            root._readPreferredClipboardType(clipboardTypesOutput.text);
+        }
+    }
+
+    property Process clipboardReadProcess: Process {
+        property string mimeType: ""
+        running: false
+
+        stdout: StdioCollector {
+            id: clipboardReadOutput
+            waitForEnd: true
+        }
+
+        stderr: StdioCollector {
+            id: clipboardReadError
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (code !== 0) {
+                if (clipboardReadError.text.length > 0 && !clipboardReadError.text.includes("No selection")) {
+                    console.warn("ClipboardService: wl-paste failed for", mimeType + ":", clipboardReadError.text);
+                }
+                root._finishClipboardCheck();
+                return;
+            }
+
+            root._prepareClipboardItem(mimeType, clipboardReadOutput.text, clipboardReadOutput.data);
+        }
+    }
+
+    property var clipboardTempFile: FileView {
+        id: clipboardTempFile
+        path: ""
+        atomicWrites: true
+        blockWrites: false
+        printErrors: false
+
+        onSaved: root._hashClipboardTempFile()
+
+        onSaveFailed: function(error) {
+            console.warn("ClipboardService: failed to write clipboard temp file:", error);
+            root._finishClipboardCheck();
+        }
+    }
+
+    property Process clipboardHashProcess: Process {
+        running: false
+
+        stdout: StdioCollector {
+            id: clipboardHashOutput
+            waitForEnd: true
+        }
+
+        stderr: StdioCollector {
+            id: clipboardHashError
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (code !== 0) {
+                console.warn("ClipboardService: md5sum failed:", clipboardHashError.text);
+                root._finishClipboardCheck();
+                return;
+            }
+
+            var hash = clipboardHashOutput.text.trim().split(/\s+/)[0] || "";
+            if (hash.length === 0) {
+                console.warn("ClipboardService: md5sum returned an empty hash");
+                root._finishClipboardCheck();
+                return;
+            }
+
+            root._clipboardHashReady(hash);
+        }
+    }
+
+    property Process clipboardImageMoveProcess: Process {
+        running: false
+
+        stderr: StdioCollector {
+            id: clipboardImageMoveError
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (code === 0) {
+                root._insertPendingClipboardItem();
+            } else {
+                console.warn("ClipboardService: failed to store clipboard image:", clipboardImageMoveError.text);
+                root._finishClipboardCheck();
+            }
+        }
+    }
+
+    property Process clipboardFileStatProcess: Process {
+        running: false
+
+        stdout: StdioCollector {
+            id: clipboardFileStatOutput
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (root._pendingClipboardItem) {
+                root._pendingClipboardItem.size = code === 0
+                    ? (parseInt(clipboardFileStatOutput.text.trim(), 10) || 0)
+                    : 0;
+            }
+            root._insertPendingClipboardItem();
+        }
+    }
+
+    property Process checkAndInsertProcess: Process {
+        running: false
+
+        stderr: StdioCollector {
+            id: clipboardInsertError
+            waitForEnd: true
+        }
+
+        onExited: function(code) {
+            if (code === 0) {
+                Qt.callLater(root.list);
+            } else {
+                console.warn("ClipboardService: clipboard insert failed with code:", code, clipboardInsertError.text);
+            }
+
+            root._finishClipboardCheck();
+        }
+    }
+
+    property Process clipboardCleanupProcess: Process {
+        running: false
+
+        onExited: function(code) {
+            root._pendingClipboardItem = null;
+            root._clipboardCheckRunning = false;
+
+            if (root._clipboardCheckPending) {
+                root._clipboardCheckPending = false;
+                Qt.callLater(root.checkClipboard);
+            }
+        }
+    }
+
     property Process listProcess: Process {
         running: false
         
@@ -153,14 +306,12 @@ QtObject {
                         var item = jsonArray[i];
                         var isFile = item.mime_type === "text/uri-list";
                         
-                        // For files, extract the filename from the URI for preview
                         var preview = item.preview;
                         if (isFile && item.full_content) {
                             var uriContent = item.full_content.trim();
                             if (uriContent.startsWith("file://")) {
-                                var filePath = uriContent.substring(7); // Remove "file://"
+                                var filePath = uriContent.substring(7);
                                 var fileName = filePath.split('/').pop();
-                                // Decode URL encoding (e.g., %20 -> space)
                                 fileName = root.decodeUriString(fileName);
                                 preview = "[File] " + fileName;
                             }
@@ -211,7 +362,6 @@ QtObject {
         }
     }
 
-    // Insert item into database - kept for backwards compatibility but deprecated
     property Process insertProcess: Process {
         property string itemHash: ""
         property string itemContent: ""
@@ -240,7 +390,6 @@ QtObject {
         }
     }
 
-    // Get full content of an item
     property Process getContentProcess: Process {
         property string itemId: ""
         running: false
@@ -260,7 +409,6 @@ QtObject {
         }
     }
 
-    // Delete item
     property Process deleteProcess: Process {
         property string itemId: ""
         running: false
@@ -271,7 +419,6 @@ QtObject {
             onStreamFinished: {
                 var deletedHash = text.trim();
                 if (deletedHash.length > 0) {
-                    // Check if current clipboard content matches the deleted item
                     clearClipboardIfMatches.deletedHash = deletedHash;
                     clearClipboardIfMatches.running = true;
                 }
@@ -295,22 +442,21 @@ QtObject {
         }
     }
     
-    // Clear system clipboard if it matches deleted item
     property Process clearClipboardIfMatches: Process {
         property string deletedHash: ""
         running: false
         
         command: ["sh", "-c",
-            "# Get current clipboard hash for different types\n" +
             "CURRENT_HASH=''; " +
             "if CONTENT=$(wl-paste --type text/uri-list 2>/dev/null); then " +
-            "  CURRENT_HASH=$(echo -n \"$CONTENT\" | tr -d '\\r' | md5sum | cut -d' ' -f1); " +
+            "  CURRENT_HASH=$(printf '%s' \"$CONTENT\" | tr -d '\\r' | md5sum | cut -d' ' -f1); " +
+            "elif IMAGE_MIME=$(wl-paste --list-types 2>/dev/null | grep '^image/' | head -1); [ -n \"$IMAGE_MIME\" ]; then " +
+            "  CURRENT_HASH=$(wl-paste --type \"$IMAGE_MIME\" 2>/dev/null | md5sum | cut -d' ' -f1); " +
+            "elif CONTENT=$(wl-paste --type 'text/plain;charset=utf-8' 2>/dev/null); then " +
+            "  CURRENT_HASH=$(printf '%s' \"$CONTENT\" | md5sum | cut -d' ' -f1); " +
             "elif CONTENT=$(wl-paste --type text/plain 2>/dev/null); then " +
-            "  CURRENT_HASH=$(echo -n \"$CONTENT\" | md5sum | cut -d' ' -f1); " +
-            "elif IMAGE_MIME=$(wl-paste --list-types 2>/dev/null | grep '^image/' | head -1); then " +
-            "  [ -n \"$IMAGE_MIME\" ] && CURRENT_HASH=$(wl-paste --type \"$IMAGE_MIME\" 2>/dev/null | md5sum | cut -d' ' -f1); " +
+            "  CURRENT_HASH=$(printf '%s' \"$CONTENT\" | md5sum | cut -d' ' -f1); " +
             "fi; " +
-            "# Clear clipboard if hashes match\n" +
             "if [ \"$CURRENT_HASH\" = '" + deletedHash + "' ]; then " +
             "  wl-copy --clear 2>/dev/null || true; " +
             "fi"
@@ -325,21 +471,17 @@ QtObject {
         }
     }
 
-    // Clear all items
     property Process clearProcess: Process {
         running: false
         
         onExited: function(code) {
             if (code === 0) {
-                // Refresh list to show only pinned items
                 Qt.callLater(root.list);
-                // Clean binary data directory (will only remove files not referenced by pinned items)
                 cleanBinaryDataDirProcess.running = true;
             }
         }
     }
     
-    // Toggle pin status
     property Process togglePinProcess: Process {
         property string itemId: ""
         running: false
@@ -361,7 +503,6 @@ QtObject {
         }
     }
     
-    // Set alias for item
     property Process setAliasProcess: Process {
         property string itemId: ""
         running: false
@@ -383,7 +524,6 @@ QtObject {
         }
     }
     
-    // Clean binary data directory - only remove orphaned files
     property Process cleanBinaryDataDirProcess: Process {
         running: false
         command: ["sh", "-c", 
@@ -395,7 +535,6 @@ QtObject {
         ]
     }
 
-    // Load image data
     property Process loadImageProcess: Process {
         property string itemId: ""
         property string mimeType: ""
@@ -415,60 +554,13 @@ QtObject {
         }
     }
     
-    // Link preview metadata fetcher
-    property Process linkPreviewProcess: Process {
-        property string requestUrl: ""
-        property string requestItemId: ""
-        running: false
-        
-        stdout: StdioCollector {
-            waitForEnd: true
-            
-            onStreamFinished: {
-                try {
-                    var metadata = JSON.parse(text);
-                    // Use request_url from the response - this is the original URL we requested
-                    // This is crucial because requestUrl property may have been overwritten
-                    // by a subsequent request before this response arrived
-                    var responseUrl = metadata.request_url || metadata.url || linkPreviewProcess.requestUrl;
-                    
-                    // Cache the result if successful, using the URL from the response
-                    if (!metadata.error && responseUrl) {
-                        root.linkPreviewCache[responseUrl] = metadata;
-                    }
-                    // Note: requestItemId may also be stale, but the receiver validates it
-                    root.linkPreviewFetched(responseUrl, metadata, linkPreviewProcess.requestItemId);
-                } catch (e) {
-                    console.warn("ClipboardService: Failed to parse link preview:", e);
-                    root.linkPreviewFetched(linkPreviewProcess.requestUrl, {'error': 'Failed to parse response'}, linkPreviewProcess.requestItemId);
-                }
-            }
-        }
-        
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text.length > 0) {
-                    console.warn("ClipboardService: linkPreviewProcess stderr:", text);
-                }
-            }
-        }
-        
-        onExited: function(code) {
-            if (code !== 0) {
-                root.linkPreviewFetched(linkPreviewProcess.requestUrl, {'error': 'Failed to fetch preview'}, linkPreviewProcess.requestItemId);
-            }
-        }
-    }
-
     signal fullContentRetrieved(string itemId, string content)
     signal linkPreviewFetched(string url, var metadata, string itemId)
     
-    // Function to decode URL-encoded strings
     function decodeUriString(str) {
         try {
             return decodeURIComponent(str);
         } catch (e) {
-            // If decoding fails, return original string
             return str;
         }
     }
@@ -483,25 +575,244 @@ QtObject {
         ensureDirProcess.running = true;
     }
 
-    function checkClipboard() {
-        if (!_initialized || _operationInProgress) return;
-        _operationInProgress = true;
-        checkAndInsertProcess.command = [checkScriptPath, dbPath, insertScriptPath, binaryDataDir];
+    function _readPreferredClipboardType(typeText) {
+        var types = typeText.split(/\r?\n/).filter(function(value) {
+            return value.length > 0;
+        });
+
+        var selectedMime = "";
+
+        if (types.indexOf("text/uri-list") !== -1) {
+            selectedMime = "text/uri-list";
+        } else {
+            for (var i = 0; i < types.length; i++) {
+                if (types[i].startsWith("image/")) {
+                    selectedMime = types[i];
+                    break;
+                }
+            }
+
+            if (selectedMime.length === 0 && types.indexOf("text/plain;charset=utf-8") !== -1) {
+                selectedMime = "text/plain;charset=utf-8";
+            }
+
+            if (selectedMime.length === 0 && types.indexOf("text/plain") !== -1) {
+                selectedMime = "text/plain";
+            }
+        }
+
+        if (selectedMime.length === 0) {
+            root._finishClipboardCheck();
+            return;
+        }
+
+        clipboardReadProcess.mimeType = selectedMime;
+        clipboardReadProcess.command = ["wl-paste", "--type", selectedMime];
+        clipboardReadProcess.running = true;
+    }
+
+    function _normalizeClipboardText(content) {
+        return String(content || "")
+            .replace(/\r/g, "")
+            .replace(/\n+$/, "");
+    }
+
+    function _clipboardPreview(content, isImage) {
+        if (isImage) return "[Image]";
+        if (content.length > 100) return content.substring(0, 97) + "...";
+        return content;
+    }
+
+    function _clipboardTextLength(content) {
+        try {
+            return Array.from(content).length;
+        } catch (e) {
+            return content.length;
+        }
+    }
+
+    function _prepareClipboardItem(sourceMime, textContent, binaryData) {
+        var isImage = sourceMime.startsWith("image/");
+        var content = isImage ? "" : _normalizeClipboardText(textContent);
+
+        if (!isImage && content.length === 0) {
+            root._finishClipboardCheck();
+            return;
+        }
+
+        var storedMime = sourceMime.startsWith("text/plain") ? "text/plain" : sourceMime;
+
+        root._pendingClipboardItem = {
+            hash: "",
+            mimeType: storedMime,
+            isImage: isImage,
+            content: content,
+            preview: _clipboardPreview(content, isImage),
+            binaryPath: "",
+            size: isImage && binaryData ? binaryData.byteLength : _clipboardTextLength(content)
+        };
+
+        clipboardTempFile.path = clipboardTempPath;
+        if (isImage) {
+            clipboardTempFile.setData(binaryData);
+        } else {
+            clipboardTempFile.setText(content);
+        }
+    }
+
+    function _hashClipboardTempFile() {
+        if (!root._pendingClipboardItem) {
+            root._finishClipboardCheck();
+            return;
+        }
+
+        clipboardHashProcess.command = ["md5sum", clipboardTempPath];
+        clipboardHashProcess.running = true;
+    }
+
+    function _imageExtension(mimeType) {
+        switch (mimeType) {
+        case "image/png": return "png";
+        case "image/jpeg": return "jpg";
+        case "image/gif": return "gif";
+        case "image/webp": return "webp";
+        case "image/bmp": return "bmp";
+        case "image/svg+xml": return "svg";
+        default: return "img";
+        }
+    }
+
+    function _padNumber(value, width) {
+        var result = String(value);
+        while (result.length < width) result = "0" + result;
+        return result;
+    }
+
+    function _newClipboardImagePath(mimeType, hash) {
+        var now = new Date();
+        var timestamp =
+            now.getFullYear() +
+            _padNumber(now.getMonth() + 1, 2) +
+            _padNumber(now.getDate(), 2) + "_" +
+            _padNumber(now.getHours(), 2) +
+            _padNumber(now.getMinutes(), 2) +
+            _padNumber(now.getSeconds(), 2) + "_" +
+            _padNumber(now.getMilliseconds(), 3);
+
+        return binaryDataDir + "/clipboard_" + timestamp + "_" + hash.substring(0, 8) + "." + _imageExtension(mimeType);
+    }
+
+    function _clipboardHashReady(hash) {
+        if (!root._pendingClipboardItem) {
+            root._finishClipboardCheck();
+            return;
+        }
+
+        root._pendingClipboardItem.hash = hash;
+
+        if (root._pendingClipboardItem.isImage) {
+            var binaryPath = _newClipboardImagePath(root._pendingClipboardItem.mimeType, hash);
+            root._pendingClipboardItem.binaryPath = binaryPath;
+            clipboardTempFile.path = "";
+            clipboardImageMoveProcess.command = ["mv", "-f", clipboardTempPath, binaryPath];
+            clipboardImageMoveProcess.running = true;
+            return;
+        }
+
+        if (root._pendingClipboardItem.mimeType === "text/uri-list") {
+            var filePath = root._pendingClipboardItem.content;
+            if (filePath.startsWith("file://")) filePath = filePath.substring(7);
+
+            if (filePath.length > 0 && !filePath.includes("\n")) {
+                clipboardFileStatProcess.command = ["stat", "-c", "%s", "--", filePath];
+                clipboardFileStatProcess.running = true;
+                return;
+            }
+
+            root._pendingClipboardItem.size = 0;
+        }
+
+        root._insertPendingClipboardItem();
+    }
+
+    function _sqlQuote(value) {
+        return "'" + String(value === undefined || value === null ? "" : value).replace(/'/g, "''") + "'";
+    }
+
+    function _insertPendingClipboardItem() {
+        var item = root._pendingClipboardItem;
+        if (!item) {
+            root._finishClipboardCheck();
+            return;
+        }
+
+        var timestamp = Math.floor(Date.now() / 1000) * 1000;
+        var fullContentSql = item.isImage
+            ? "''"
+            : "CAST(readfile(" + _sqlQuote(clipboardTempPath) + ") AS TEXT)";
+
+        var sql = [
+            "PRAGMA busy_timeout=5000;",
+            "BEGIN TRANSACTION;",
+            "INSERT INTO clipboard_items",
+            "(content_hash, mime_type, preview, full_content, is_image, binary_path, size, pinned, display_index, created_at, updated_at)",
+            "VALUES (" +
+                _sqlQuote(item.hash) + ", " +
+                _sqlQuote(item.mimeType) + ", " +
+                _sqlQuote(item.preview) + ", " +
+                fullContentSql + ", " +
+                (item.isImage ? "1" : "0") + ", " +
+                _sqlQuote(item.binaryPath) + ", " +
+                Number(item.size || 0) + ", 0, 0, " +
+                timestamp + ", " + timestamp +
+            ")",
+            "ON CONFLICT(content_hash) DO UPDATE SET",
+            "updated_at = " + timestamp + ",",
+            "display_index = 0;",
+            "WITH reindexed AS (",
+            "  SELECT id, ROW_NUMBER() OVER (ORDER BY updated_at DESC, id DESC) - 1 AS new_idx",
+            "  FROM clipboard_items WHERE pinned = 0",
+            ")",
+            "UPDATE clipboard_items",
+            "SET display_index = (",
+            "  SELECT new_idx FROM reindexed WHERE reindexed.id = clipboard_items.id",
+            ")",
+            "WHERE pinned = 0;",
+            "COMMIT;"
+        ].join("\n");
+
+        // No shell here: Quickshell passes the database path and SQL directly
+        // as argv entries to sqlite3.
+        checkAndInsertProcess.command = ["sqlite3", dbPath, sql];
         checkAndInsertProcess.running = true;
     }
 
-    function getImageHash(mimeType) {
-        // Deprecated - now handled by clipboard_check.sh
+    function _finishClipboardCheck() {
+        if (!root._clipboardCheckRunning) return;
+
+        clipboardTempFile.path = "";
+        clipboardCleanupProcess.command = ["rm", "-f", clipboardTempPath];
+
+        if (!clipboardCleanupProcess.running) {
+            clipboardCleanupProcess.running = true;
+        }
     }
 
-    function insertTextItemFromFile(hash, tmpFile) {
-        // Deprecated - now handled by clipboard_check.sh
+    function checkClipboard() {
+        if (!_initialized) return;
+
+        if (_clipboardCheckRunning) {
+            _clipboardCheckPending = true;
+            return;
+        }
+
+        _clipboardCheckRunning = true;
+        _pendingClipboardItem = null;
+
+        clipboardEnsureDirProcess.command = ["mkdir", "-p", binaryDataDir];
+        clipboardEnsureDirProcess.running = true;
     }
-    
-    function insertFileItemFromFile(hash, tmpFile) {
-        // Deprecated - now handled by clipboard_check.sh
-    }
-    
+
     property Process writeTmpProcess: Process {
         property string itemHash: ""
         property string itemContent: ""
@@ -510,23 +821,15 @@ QtObject {
         stdout: StdioCollector {
             waitForEnd: true
             
-            onStreamFinished: {
-                // Deprecated
-            }
+            onStreamFinished: { }
         }
-    }
-
-    function insertImageItem(hash, mimeType) {
-        // Deprecated - now handled by clipboard_check.sh
     }
 
     function list() {
         if (!_initialized) return;
         _operationInProgress = true;
-        // Use JSON mode for reliable parsing, with timeout to avoid locks
-        // ORDER BY pinned DESC, display_index ASC to show pinned items first (ordered by index), then unpinned items (ordered by index)
         listProcess.command = ["sh", "-c", 
-            "sqlite3 '" + dbPath + "' <<'EOSQL'\n.timeout 5000\n.mode json\nSELECT id, mime_type, preview, is_image, binary_path, content_hash, size, created_at, pinned, alias, display_index FROM clipboard_items ORDER BY pinned DESC, display_index ASC, updated_at DESC, id DESC LIMIT 100;\nEOSQL"
+            "sqlite3 '" + dbPath + "' <<'EOSQL'\n.timeout 5000\n.mode json\nSELECT id, mime_type, preview, full_content, is_image, binary_path, content_hash, size, created_at, pinned, alias, display_index FROM clipboard_items ORDER BY pinned DESC, display_index ASC, updated_at DESC, id DESC LIMIT 100;\nEOSQL"
         ];
         listProcess.running = true;
     }
@@ -543,7 +846,6 @@ QtObject {
         _operationInProgress = true;
         deleteProcess.itemId = id;
         
-        // First, get the item's hash to check if it's currently in clipboard
         deleteProcess.command = ["sh", "-c", 
             "HASH=$(sqlite3 '" + dbPath + "' '.timeout 5000' 'SELECT content_hash FROM clipboard_items WHERE id = " + id + ";'); " +
             "sqlite3 '" + dbPath + "' '.timeout 5000' 'DELETE FROM clipboard_items WHERE id = " + id + ";'; " +
@@ -599,7 +901,6 @@ QtObject {
         if (!_initialized) return;
         _operationInProgress = true;
         setAliasProcess.itemId = id;
-        // Escape single quotes in alias by replacing ' with ''
         var escapedAlias = alias.replace(/'/g, "''");
         if (alias.trim() === "") {
             setAliasProcess.command = ["sh", "-c", "sqlite3 '" + dbPath + "' '.timeout 5000' 'UPDATE clipboard_items SET alias = NULL WHERE id = " + id + ";'"];
@@ -632,28 +933,516 @@ QtObject {
         return imageDataById[id] || "";
     }
     
+    function _finishLinkPreview(url, itemId, metadata) {
+        var responseUrl = metadata.request_url || metadata.url || url;
+
+        if (!metadata.error && responseUrl) {
+            root.linkPreviewCache[responseUrl] = metadata;
+        }
+
+        root.linkPreviewFetched(responseUrl, metadata, itemId);
+    }
+
+    function _httpGet(url, headers, timeoutMs, callback) {
+        var request = new XMLHttpRequest();
+        var finished = false;
+        var timeoutTimer = Qt.createQmlObject(
+            'import QtQuick; Timer { repeat: false }',
+            root
+        );
+
+        timeoutTimer.interval = timeoutMs;
+        timeoutTimer.triggered.connect(function() {
+            if (finished) return;
+            finished = true;
+            request.abort();
+            timeoutTimer.destroy();
+            callback({
+                status: 0,
+                statusText: "Timeout",
+                text: "",
+                contentType: "",
+                finalUrl: url
+            });
+        });
+
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE || finished) return;
+
+            finished = true;
+            timeoutTimer.stop();
+
+            var finalUrl = request.responseURL && request.responseURL.length > 0
+                ? request.responseURL
+                : url;
+            var contentType = request.getResponseHeader("Content-Type") || "";
+
+            var result = {
+                status: request.status,
+                statusText: request.statusText || "",
+                text: request.responseText || "",
+                contentType: contentType,
+                finalUrl: finalUrl
+            };
+
+            timeoutTimer.destroy();
+            callback(result);
+        };
+
+        try {
+            request.open("GET", url, true);
+
+            if (headers) {
+                for (var key in headers) {
+                    try {
+                        request.setRequestHeader(key, headers[key]);
+                    } catch (e) {
+                        // Some HTTP headers may be controlled by Qt/network backends.
+                    }
+                }
+            }
+
+            timeoutTimer.start();
+            request.send();
+        } catch (e) {
+            if (!finished) {
+                finished = true;
+                timeoutTimer.stop();
+                timeoutTimer.destroy();
+                callback({
+                    status: 0,
+                    statusText: e.toString(),
+                    text: "",
+                    contentType: "",
+                    finalUrl: url
+                });
+            }
+        }
+    }
+
+    function _linkRequestHeaders() {
+        return {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "identity",
+            "Range": "bytes=0-511999"
+        };
+    }
+
+    function _isHttpUrl(url) {
+        return /^https?:\/\/[^\/\s]+/i.test(url);
+    }
+
+    function _isYoutubeUrl(url) {
+        return url.includes("youtube.com") || url.includes("youtu.be");
+    }
+
+    function _isTwitterUrl(url) {
+        return url.includes("twitter.com") || url.includes("x.com");
+    }
+
+    function _extractYoutubeId(url) {
+        var patterns = [
+            /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+            /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+            /youtube\.com\/v\/([a-zA-Z0-9_-]{11})/,
+            /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/
+        ];
+
+        for (var i = 0; i < patterns.length; i++) {
+            var match = url.match(patterns[i]);
+            if (match) return match[1];
+        }
+
+        return "";
+    }
+
+    function _decodeHtmlEntities(text) {
+        if (!text) return "";
+
+        var decoded = text
+            .replace(/&amp;/gi, "&")
+            .replace(/&lt;/gi, "<")
+            .replace(/&gt;/gi, ">")
+            .replace(/&quot;/gi, "\"")
+            .replace(/&#39;|&apos;/gi, "'")
+            .replace(/&nbsp;/gi, " ");
+
+        decoded = decoded.replace(/&#(\d+);/g, function(match, value) {
+            var code = parseInt(value, 10);
+            if (isNaN(code)) return match;
+            try {
+                return String.fromCodePoint(code);
+            } catch (e) {
+                return String.fromCharCode(code);
+            }
+        });
+
+        decoded = decoded.replace(/&#x([0-9a-f]+);/gi, function(match, value) {
+            var code = parseInt(value, 16);
+            if (isNaN(code)) return match;
+            try {
+                return String.fromCodePoint(code);
+            } catch (e) {
+                return String.fromCharCode(code);
+            }
+        });
+
+        return decoded;
+    }
+
+    function _stripHtml(html) {
+        return _decodeHtmlEntities(
+            (html || "")
+                .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+                .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+                .replace(/<[^>]+>/g, " ")
+                .replace(/\s+/g, " ")
+                .trim()
+        );
+    }
+
+    function _parseTagAttributes(tag) {
+        var attrs = {};
+        var re = /([^\s=\/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+        var match;
+
+        while ((match = re.exec(tag)) !== null) {
+            var key = match[1].toLowerCase();
+            var value = match[2] !== undefined
+                ? match[2]
+                : (match[3] !== undefined ? match[3] : match[4]);
+            attrs[key] = _decodeHtmlEntities(value || "");
+        }
+
+        return attrs;
+    }
+
+    function _urlParts(url) {
+        var match = String(url).match(/^(https?):\/\/([^\/?#]+)([^?#]*)/i);
+        if (!match) return null;
+
+        return {
+            scheme: match[1].toLowerCase(),
+            host: match[2],
+            path: match[3] || "/"
+        };
+    }
+
+    function _resolveUrl(baseUrl, value) {
+        if (!value) return "";
+        if (/^https?:\/\//i.test(value) || /^data:/i.test(value)) return value;
+
+        var parts = _urlParts(baseUrl);
+        if (!parts) return value;
+
+        if (value.startsWith("//")) {
+            return parts.scheme + ":" + value;
+        }
+
+        if (value.startsWith("/")) {
+            return parts.scheme + "://" + parts.host + value;
+        }
+
+        var basePath = parts.path;
+        var slash = basePath.lastIndexOf("/");
+        var directory = slash >= 0 ? basePath.substring(0, slash + 1) : "/";
+
+        var combined = directory + value;
+        var segments = combined.split("/");
+        var normalized = [];
+
+        for (var i = 0; i < segments.length; i++) {
+            var segment = segments[i];
+            if (segment === "" || segment === ".") continue;
+            if (segment === "..") {
+                if (normalized.length > 0) normalized.pop();
+            } else {
+                normalized.push(segment);
+            }
+        }
+
+        return parts.scheme + "://" + parts.host + "/" + normalized.join("/");
+    }
+
+    function _faviconScore(candidate) {
+        var size = candidate.size;
+        var sizeScore;
+
+        if (size >= 32 && size <= 128) {
+            sizeScore = size;
+        } else if (size > 128) {
+            sizeScore = 128 - Math.floor((size - 128) / 10);
+        } else {
+            sizeScore = size;
+        }
+
+        return candidate.priority * 10000 + sizeScore;
+    }
+
+    function _extractHtmlMetadata(html, requestUrl, finalUrl) {
+        html = (html || "").substring(0, 500 * 1024);
+
+        var metadata = {
+            title: "",
+            description: "",
+            image: "",
+            url: "",
+            site_name: "",
+            type: "website",
+            favicon: ""
+        };
+        var faviconCandidates = [];
+
+        var titleMatch = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i);
+        if (titleMatch) {
+            metadata.title = _stripHtml(titleMatch[1]);
+        }
+
+        var metaRe = /<meta\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>/gi;
+        var tag;
+        while ((tag = metaRe.exec(html)) !== null) {
+            var attrs = _parseTagAttributes(tag[0]);
+            var content = attrs.content || "";
+            if (!content) continue;
+
+            var prop = (attrs.property || "").toLowerCase();
+            var name = (attrs.name || "").toLowerCase();
+
+            if (prop === "og:title") {
+                metadata.title = content;
+            } else if (prop === "og:description") {
+                metadata.description = content;
+            } else if (prop === "og:image") {
+                metadata.image = content;
+            } else if (prop === "og:url") {
+                metadata.url = content;
+            } else if (prop === "og:site_name") {
+                metadata.site_name = content;
+            } else if (prop === "og:type") {
+                metadata.type = content;
+            }
+
+            if (name === "twitter:title" && !metadata.title) {
+                metadata.title = content;
+            } else if (name === "twitter:description" && !metadata.description) {
+                metadata.description = content;
+            } else if (name === "twitter:image" && !metadata.image) {
+                metadata.image = content;
+            } else if (name === "description" && !metadata.description) {
+                metadata.description = content;
+            }
+        }
+
+        var linkRe = /<link\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>/gi;
+        while ((tag = linkRe.exec(html)) !== null) {
+            var linkAttrs = _parseTagAttributes(tag[0]);
+            var rel = (linkAttrs.rel || "").toLowerCase();
+            var href = linkAttrs.href || "";
+            var sizes = linkAttrs.sizes || "";
+            var linkType = (linkAttrs.type || "").toLowerCase();
+
+            if (!href || rel.indexOf("icon") === -1) continue;
+
+            var size = 0;
+            var sizeMatch = sizes.match(/^(\d+)x\d+/i);
+            if (sizeMatch) size = parseInt(sizeMatch[1], 10) || 0;
+
+            var hrefLower = href.toLowerCase();
+            var priority = 1;
+            if (hrefLower.includes(".svg") || linkType.includes("svg")) {
+                priority = 3;
+            } else if (hrefLower.includes(".png") || linkType.includes("png")) {
+                priority = 2;
+            }
+
+            faviconCandidates.push({
+                href: href,
+                size: size,
+                priority: priority
+            });
+
+            if (!metadata.favicon) metadata.favicon = href;
+        }
+
+        if (faviconCandidates.length > 0) {
+            faviconCandidates.sort(function(a, b) {
+                return _faviconScore(b) - _faviconScore(a);
+            });
+            metadata.favicon = faviconCandidates[0].href;
+        }
+
+        var effectiveUrl = finalUrl || requestUrl;
+        var parts = _urlParts(effectiveUrl);
+
+        if (metadata.image) {
+            metadata.image = _resolveUrl(effectiveUrl, metadata.image);
+        }
+
+        if (metadata.favicon) {
+            metadata.favicon = _resolveUrl(effectiveUrl, metadata.favicon);
+        } else if (parts) {
+            metadata.favicon = parts.scheme + "://" + parts.host + "/favicon.ico";
+        }
+
+        if (!metadata.url) {
+            metadata.url = requestUrl;
+        }
+
+        metadata.request_url = requestUrl;
+
+        if (!metadata.site_name && parts) {
+            metadata.site_name = parts.host;
+        }
+
+        return metadata;
+    }
+
+    function _fetchGenericLinkPreview(url, itemId) {
+        _httpGet(url, _linkRequestHeaders(), 5000, function(response) {
+            if (response.status < 200 || response.status >= 400) {
+                _finishLinkPreview(url, itemId, {
+                    error: response.status > 0
+                        ? "HTTP " + response.status
+                        : "Connection failed: " + response.statusText,
+                    url: url,
+                    request_url: url
+                });
+                return;
+            }
+
+            var contentType = (response.contentType || "").toLowerCase();
+            if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+                _finishLinkPreview(url, itemId, {
+                    error: "Not an HTML page",
+                    url: url,
+                    request_url: url
+                });
+                return;
+            }
+
+            try {
+                var metadata = _extractHtmlMetadata(
+                    response.text,
+                    url,
+                    response.finalUrl
+                );
+                _finishLinkPreview(url, itemId, metadata);
+            } catch (e) {
+                _finishLinkPreview(url, itemId, {
+                    error: "Failed to parse: " + e,
+                    url: url,
+                    request_url: url
+                });
+            }
+        });
+    }
+
+    function _fetchYoutubeLinkPreview(url, itemId) {
+        var videoId = _extractYoutubeId(url);
+        if (!videoId) {
+            _fetchGenericLinkPreview(url, itemId);
+            return;
+        }
+
+        var endpoint =
+            "https://www.youtube.com/oembed?url=" +
+            encodeURIComponent("https://www.youtube.com/watch?v=" + videoId) +
+            "&format=json";
+
+        _httpGet(endpoint, null, 5000, function(response) {
+            if (response.status >= 200 && response.status < 400) {
+                try {
+                    var data = JSON.parse(response.text);
+                    var thumbnail = data.thumbnail_url || "";
+
+                    if (thumbnail.includes("hqdefault")) {
+                        thumbnail = thumbnail.replace("hqdefault", "maxresdefault");
+                    }
+
+                    _finishLinkPreview(url, itemId, {
+                        title: data.title || "",
+                        description: data.author_name || "Unknown",
+                        image: thumbnail,
+                        url: url,
+                        request_url: url,
+                        site_name: "YouTube",
+                        type: "video",
+                        favicon: "https://www.youtube.com/s/desktop/9c0f82da/img/favicon_144x144.png",
+                        author: data.author_name || "",
+                        video_id: videoId
+                    });
+                    return;
+                } catch (e) {
+                    // Fall through to regular page metadata.
+                }
+            }
+
+            _fetchGenericLinkPreview(url, itemId);
+        });
+    }
+
+    function _fetchTwitterLinkPreview(url, itemId) {
+        var endpoint = "https://publish.twitter.com/oembed?url=" + encodeURIComponent(url);
+
+        _httpGet(endpoint, null, 5000, function(response) {
+            if (response.status >= 200 && response.status < 400) {
+                try {
+                    var data = JSON.parse(response.text);
+                    _finishLinkPreview(url, itemId, {
+                        title: data.author_name || "Tweet",
+                        description: _stripHtml(data.html || ""),
+                        image: "",
+                        url: url,
+                        request_url: url,
+                        site_name: "X (Twitter)",
+                        type: "article",
+                        favicon: "https://abs.twimg.com/favicons/twitter.3.ico",
+                        author: data.author_name || ""
+                    });
+                    return;
+                } catch (e) {
+                    // Fall through to regular page metadata.
+                }
+            }
+
+            _fetchGenericLinkPreview(url, itemId);
+        });
+    }
+
     function fetchLinkPreview(url, itemId) {
         if (!_initialized) return;
-        
-        // Check cache first
+
         if (linkPreviewCache[url]) {
             Qt.callLater(function() {
                 root.linkPreviewFetched(url, linkPreviewCache[url], itemId);
             });
             return;
         }
-        
-        linkPreviewProcess.requestUrl = url;
-        linkPreviewProcess.requestItemId = itemId;
-        linkPreviewProcess.command = ["python3", linkPreviewScriptPath, url, "5"];
-        linkPreviewProcess.running = true;
+
+        if (!_isHttpUrl(url)) {
+            Qt.callLater(function() {
+                root.linkPreviewFetched(url, {
+                    error: "Invalid URL",
+                    url: url,
+                    request_url: url
+                }, itemId);
+            });
+            return;
+        }
+
+        if (_isYoutubeUrl(url)) {
+            _fetchYoutubeLinkPreview(url, itemId);
+        } else if (_isTwitterUrl(url)) {
+            _fetchTwitterLinkPreview(url, itemId);
+        } else {
+            _fetchGenericLinkPreview(url, itemId);
+        }
     }
-    
-    // Reorder item by moving it to a new index
+
     function reorderItem(itemId, newIndex) {
         if (!_initialized) return;
-        
-        // Get current item info
         var item = null;
         for (var i = 0; i < items.length; i++) {
             if (items[i].id === itemId) {
@@ -663,13 +1452,8 @@ QtObject {
         }
         
         if (!item) return;
-        
         var isPinned = item.pinned ? 1 : 0;
-        
-        // Validate newIndex is non-negative
         if (newIndex < 0) newIndex = 0;
-        
-        // Execute reordering with conflict resolution
         reorderProcess.command = ["sh", "-c", 
             "sqlite3 '" + dbPath + "' <<'EOSQL'\n" +
             ".timeout 5000\n" +
@@ -690,7 +1474,6 @@ QtObject {
         reorderProcess.running = true;
     }
     
-    // Move item up (decrease index)
     function moveItemUp(itemId) {
         var item = null;
         var currentIdx = -1;
@@ -703,27 +1486,16 @@ QtObject {
         }
         
         if (!item || currentIdx < 0) return;
-        
-        // Can't move up if first item
         if (currentIdx === 0) return;
-        
-        // Check if previous item has same pinned status
         var prevItem = items[currentIdx - 1];
         if (prevItem.pinned !== item.pinned) return;
-        
-        // Optimistic update: Swap in local array
         var temp = items[currentIdx];
         items[currentIdx] = items[currentIdx - 1];
         items[currentIdx - 1] = temp;
-        
-        // Notify UI to update immediately
         listCompleted();
-        
-        // Swap indices with previous item
         swapItems(itemId, prevItem.id);
     }
     
-    // Move item down (increase index)
     function moveItemDown(itemId) {
         var item = null;
         var currentIdx = -1;
@@ -736,27 +1508,16 @@ QtObject {
         }
         
         if (!item || currentIdx < 0) return;
-        
-        // Can't move down if last item
         if (currentIdx >= items.length - 1) return;
-        
-        // Check if next item has same pinned status
         var nextItem = items[currentIdx + 1];
         if (nextItem.pinned !== item.pinned) return;
-        
-        // Optimistic update: Swap in local array
         var temp = items[currentIdx];
         items[currentIdx] = items[currentIdx + 1];
         items[currentIdx + 1] = temp;
-        
-        // Notify UI to update immediately
         listCompleted();
-        
-        // Swap indices with next item
         swapItems(itemId, nextItem.id);
     }
     
-    // Swap display indices between two items
     function swapItems(itemId1, itemId2) {
         if (!_initialized) return;
         
@@ -822,8 +1583,7 @@ QtObject {
             }
         }
     }
-    
-    // Emoji paste process - persists even when dashboard closes
+
     property Process emojiTypeProcess: Process {
         running: false
         
@@ -846,21 +1606,16 @@ QtObject {
         interval: 250
         repeat: false
         onTriggered: {
-            // Simulate Ctrl+V: press Ctrl, press V, release V, release Ctrl
             emojiTypeProcess.command = ["wtype", "-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"];
             emojiTypeProcess.running = true;
         }
     }
     
-    // Function to copy and paste emoji via Ctrl+V
     function copyAndTypeEmoji(emojiText) {
-        // Copy to clipboard
         var copyCmd = ["bash", "-c", "echo -n '" + emojiText.replace(/'/g, "'\\''") + "' | wl-copy"];
         var copyProc = Qt.createQmlObject('import Quickshell.Io; Process {}', root);
         copyProc.command = copyCmd;
         copyProc.running = true;
-        
-        // Schedule Ctrl+V paste
         emojiTypeTimer.start();
     }
 
