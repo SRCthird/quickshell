@@ -11,72 +11,162 @@ Singleton {
     id: root
 
     // General Idle Settings
-    property string lockCmd: Config.system.idle.general.lock_cmd ?? "qs ipc call lockscreen lock"
-    property string beforeSleepCmd: Config.system.idle.general.before_sleep_cmd ?? "loginctl lock-session"
-    property string afterSleepCmd: Config.system.idle.general.after_sleep_cmd ?? "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\""
+    property string lockCmd:
+        Config.system.idle.general.lock_cmd
+        ?? "qs ipc call lockscreen lock"
 
-    // Login Lock Daemon
-    // Helper script that listens to Lock signal and executes lockCmd from config
+    property string beforeSleepCmd:
+        Config.system.idle.general.before_sleep_cmd
+        ?? "loginctl lock-session"
+
+    property string afterSleepCmd:
+        Config.system.idle.general.after_sleep_cmd
+        ?? "hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\""
+
+    property bool awaitingPrepareForSleepValue: false
+
     property var loginLockProc: Process {
         id: loginLockProc
+
         running: true
-        command: ["bash", Qt.resolvedUrl("../../scripts/loginlock.sh").toString().replace("file://", "")]
-        onExited: exitCode => {
-            if (exitCode !== 0) {
-                console.warn("loginlock.sh exited with code " + exitCode + ". Restarting...");
-                loginLockRestartTimer.start();
+
+        command: [
+            "dbus-monitor",
+            "--system",
+            "type='signal',interface='org.freedesktop.login1.Session',member='Lock'"
+        ]
+
+        stdout: SplitParser {
+            onRead: data => {
+                const line = data.trim();
+
+                if (line.indexOf(
+                    "interface=org.freedesktop.login1.Session; member=Lock"
+                ) !== -1) {
+                    console.log("Received login1 Lock signal");
+
+                    root.executeCommand(root.lockCmd);
+                }
             }
+        }
+
+        stderr: SplitParser {
+            onRead: data => {
+                const line = data.trim();
+
+                if (line.length > 0)
+                    console.warn("login1 lock monitor:", line);
+            }
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            console.warn(
+                "login1 lock monitor exited with code "
+                + exitCode
+                + ". Restarting..."
+            );
+
+            loginLockRestartTimer.start();
         }
     }
 
     property var loginLockRestartTimer: Timer {
         id: loginLockRestartTimer
+
         interval: 1000
         repeat: false
-        onTriggered: loginLockProc.running = true
+
+        onTriggered: {
+            if (!loginLockProc.running)
+                loginLockProc.running = true;
+        }
     }
 
-    // Sleep Monitor Daemon
-    // Helper script that listens to PrepareForSleep signal and executes sleep commands from config
     property var sleepMonitorProc: Process {
         id: sleepMonitorProc
+
         running: true
-        command: ["bash", Qt.resolvedUrl("../../scripts/sleep_monitor.sh").toString().replace("file://", "")]
-        
+
+        command: [
+            "dbus-monitor",
+            "--system",
+            "type='signal',path='/org/freedesktop/login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"
+        ]
+
         stdout: SplitParser {
             onRead: data => {
-                const signal = data.trim();
-                if (signal === "SUSPEND") {
+                const line = data.trim();
+
+                if (line.indexOf(
+                    "interface=org.freedesktop.login1.Manager; member=PrepareForSleep"
+                ) !== -1) {
+                    root.awaitingPrepareForSleepValue = true;
+                    return;
+                }
+
+                if (!root.awaitingPrepareForSleepValue)
+                    return;
+
+                if (line === "boolean true") {
+                    root.awaitingPrepareForSleepValue = false;
+
+                    console.log("System preparing for sleep");
                     SuspendManager.onPrepareForSleep();
-                } else if (signal === "WAKE") {
+
+                    return;
+                }
+
+                if (line === "boolean false") {
+                    root.awaitingPrepareForSleepValue = false;
+
+                    console.log("System resumed from sleep");
                     SuspendManager.onWakingUp();
                 }
             }
         }
 
-        onExited: exitCode => {
-            if (exitCode !== 0) {
-                console.warn("sleep_monitor.sh exited with code " + exitCode + ". Restarting...");
-                sleepMonitorRestartTimer.start();
+        stderr: SplitParser {
+            onRead: data => {
+                const line = data.trim();
+
+                if (line.length > 0)
+                    console.warn("login1 sleep monitor:", line);
             }
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            root.awaitingPrepareForSleepValue = false;
+
+            console.warn(
+                "login1 sleep monitor exited with code "
+                + exitCode
+                + ". Restarting..."
+            );
+
+            sleepMonitorRestartTimer.start();
         }
     }
 
     property var sleepMonitorRestartTimer: Timer {
         id: sleepMonitorRestartTimer
+
         interval: 1000
         repeat: false
-        onTriggered: sleepMonitorProc.running = true
+
+        onTriggered: {
+            if (!sleepMonitorProc.running)
+                sleepMonitorProc.running = true;
+        }
     }
 
-    // Master Idle Logic
     property int elapsedIdleTime: 0
-    property var triggeredListeners: [] // Keeps track of indices that have fired
 
-    // Master Monitor: Detects "absence of activity" almost immediately
+    property var triggeredListeners: []
+
     property var masterMonitor: IdleMonitor {
         id: masterMonitor
-        timeout: 1 // 1 second threshold to consider the session "idle"
+
+        timeout: 1
         respectInhibitors: true
 
         onIsIdleChanged: {
@@ -91,8 +181,10 @@ Singleton {
 
     property var idleTimer: Timer {
         id: idleTimer
-        interval: 1000 // 1 second tick
+
+        interval: 1000
         repeat: true
+
         onTriggered: {
             root.elapsedIdleTime += 1;
             root.checkListeners();
@@ -100,58 +192,66 @@ Singleton {
     }
 
     function executeCommand(cmd) {
-        if (!cmd) return;
-        
-        // Escape backslashes and quotes for the QML string
-        let escapedCmd = cmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-        
-        try {
-            let proc = Qt.createQmlObject(`
-                import Quickshell.Io
-                Process {
-                    command: ["sh", "-c", "${escapedCmd}"]
-                    running: true
-                    onExited: destroy()
-                }
-            `, root, "dynamicProc");
-        } catch (e) {
-            console.error("Failed to create process for command:", cmd, e);
-        }
+        if (!cmd || cmd.trim().length === 0)
+            return;
+
+        Quickshell.execDetached([
+            "sh",
+            "-c",
+            cmd
+        ]);
     }
 
     function checkListeners() {
-        let listeners = Config.system.idle.listeners;
-        for (let i = 0; i < listeners.length; i++) {
-            let listener = listeners[i];
-            let tVal = listener.timeout || 60;
+        const listeners = Config.system.idle.listeners;
 
-            // If time matches and hasn't been triggered yet
-            if (root.elapsedIdleTime >= tVal && !root.triggeredListeners.includes(i)) {
+        for (let i = 0; i < listeners.length; i++) {
+            const listener = listeners[i];
+            const tVal = listener.timeout || 60;
+
+            if (
+                root.elapsedIdleTime >= tVal
+                && !root.triggeredListeners.includes(i)
+            ) {
                 if (listener.onTimeout) {
-                    console.log("Idle timer " + tVal + "s reached: " + listener.onTimeout);
+                    console.log(
+                        "Idle timer "
+                        + tVal
+                        + "s reached: "
+                        + listener.onTimeout
+                    );
+
                     root.executeCommand(listener.onTimeout);
                 }
+
                 root.triggeredListeners.push(i);
             }
         }
     }
 
     function resetIdleState() {
-        let listeners = Config.system.idle.listeners;
+        const listeners = Config.system.idle.listeners;
 
-        // Execute resume commands for all triggered listeners
-        // We iterate backwards to undo latest states first (optional preference)
-        for (let i = root.triggeredListeners.length - 1; i >= 0; i--) {
-            let idx = root.triggeredListeners[i];
-            let listener = listeners[idx];
+        for (
+            let i = root.triggeredListeners.length - 1;
+            i >= 0;
+            i--
+        ) {
+            const idx = root.triggeredListeners[i];
+            const listener = listeners[idx];
 
             if (listener && listener.onResume) {
-                console.log("Idle resuming (undoing " + (listener.timeout || 0) + "s): " + listener.onResume);
+                console.log(
+                    "Idle resuming (undoing "
+                    + (listener.timeout || 0)
+                    + "s): "
+                    + listener.onResume
+                );
+
                 root.executeCommand(listener.onResume);
             }
         }
 
-        // Reset counters
         root.elapsedIdleTime = 0;
         root.triggeredListeners = [];
     }
