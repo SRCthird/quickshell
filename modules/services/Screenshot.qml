@@ -8,13 +8,13 @@ import qs.modules.globals
 QtObject {
     id: root
 
-    signal screenshotCaptured(string path) // Generic signal (maybe unused now for per-monitor)
-    signal monitorScreenshotReady(string monitorName, string path) // NEW: Signal for per-monitor readiness
+    signal screenshotCaptured(string path)
+    signal monitorScreenshotReady(string monitorName, string path)
     signal errorOccurred(string message)
     signal windowListReady(var windows)
     signal monitorsListReady(var monitors)
     signal lensImageReady(string path)
-    signal imageSaved(string path) // New signal for Overlay
+    signal imageSaved(string path)
 
     property string tempPathBase: "/tmp/shell_freeze"
     property string cropPath: "/tmp/shell_crop.png"
@@ -26,15 +26,13 @@ QtObject {
     property string finalPath: ""
     
     property var _activeWorkspaceIds: []
-    property var monitors: [] // List of monitor objects
+    property var monitors: [] 
     
-    // Selection state to synchronize UI across monitors
     property int selectionX: 0
     property int selectionY: 0
     property int selectionW: 0
     property int selectionH: 0
     
-    // Store monitor scale factor for coordinate scaling
     property real monitorScale: 1.0
 
     property bool _initialized: false
@@ -45,14 +43,11 @@ QtObject {
         xdgProcess.running = true;
     }
 
-    // Process to resolve XDG_PICTURES_DIR
     property Process xdgProcess: Process {
         id: xdgProcess
         command: ["bash", "-c", "xdg-user-dir PICTURES"]
         stdout: StdioCollector {
-             onTextChanged: {
-                // Not running immediately, handled in onExited
-             }
+             onTextChanged: { }
         }
         running: false
         onExited: exitCode => {
@@ -72,25 +67,18 @@ QtObject {
         command: ["mkdir", "-p", root.screenshotsDir]
     }
 
-    // Dynamic list of freeze processes, managed via bash for simplicity?
-    // Or we can use a single shell script that forks grim for each monitor.
-    // "grim -o name1 path1 & grim -o name2 path2 & wait"
     property Process freezeProcess: Process {
         id: freezeProcess
-        // Command built dynamically
         command: [] 
         onExited: exitCode => {
-            root._freezing = false; // Reset lock flag
+            root._freezing = false;
             if (exitCode === 0) {
-                // Notify all monitors that their screenshot is ready
-                // We assume if the batch command finished, all are done.
                 for (var i = 0; i < root.monitors.length; i++) {
                     var m = root.monitors[i];
                     var path = root.tempPathBase + "_" + m.name + ".png";
                     root.monitorScreenshotReady(m.name, path);
                 }
-                // Also emit generic for compatibility?
-                root.screenshotCaptured(root.tempPathBase + "_ALL.png") // Dummy path?
+                root.screenshotCaptured(root.tempPathBase + "_ALL.png")
             } else {
                 root.errorOccurred("Failed to capture screen (grim)")
                 root._freezing = false;
@@ -98,7 +86,6 @@ QtObject {
         }
     }
     
-    // Process for fetching monitors
     property Process monitorsProcess: Process {
         id: monitorsProcess
         command: ["hyprctl", "-j", "monitors"]
@@ -142,7 +129,6 @@ QtObject {
         }
     }
 
-    // Process for fetching windows
     property Process clientsProcess: Process {
         id: clientsProcess
         command: ["hyprctl", "-j", "clients"]
@@ -178,15 +164,14 @@ QtObject {
         }
     }
 
-    // Process for cropping/saving
     property Process cropProcess: Process {
         id: cropProcess
-        // command set dynamically
+
         onExited: exitCode => {
             if (exitCode === 0) {
                 if (root.captureMode === "lens") {
-                    root.runLensScript()
-                    root.captureMode = "normal" 
+                    root.runLens()
+                    root.captureMode = "normal"
                 } else {
                     copyProcess.running = true
                     root.imageSaved(root.finalPath)
@@ -212,52 +197,34 @@ QtObject {
         }
     }
 
-    property Process lensProcess: Process {
-        id: lensProcess
-        stdout: StdioCollector {}
-        stderr: StdioCollector {}
-        onExited: exitCode => {
-            if (exitCode === 0) {
-                console.log("Screenshot: Google Lens script executed successfully")
-            } else {
-                root.errorOccurred("Failed to open Google Lens: " + lensProcess.stderr.text)
-            }
-        }
-    }
-
-    // Prevent double execution
     property bool _freezing: false
 
     function freezeScreen() {
         if (_freezing) return;
         _freezing = true;
 
-        // FAST PATH: Use Quickshell.screens to start freeze immediately
-        // Map Quickshell screens to the format expected (physical dimensions)
         var qsScreens = Quickshell.screens;
         var mappedMonitors = [];
         for (var i = 0; i < qsScreens.length; i++) {
              var s = qsScreens[i];
              mappedMonitors.push({
-                 id: i, // Dummy ID
+                 id: i,
                  name: s.name,
                  x: s.x,
                  y: s.y,
-                 width: s.width * s.scale, // approx physical width
-                 height: s.height * s.scale, // approx physical height
+                 width: s.width * s.scale,
+                 height: s.height * s.scale,
                  scale: s.scale
              });
         }
         root.monitors = mappedMonitors;
         
-        // Trigger freeze immediately
         root.executeFreezeBatch();
 
 		root.fetchWindows();
     }
     
     function fetchWindows() {
-        // Start fetching full metadata (workspaces) for Window Mode
         monitorsProcess.running = true
     }
     
@@ -268,13 +235,10 @@ QtObject {
             return;
         }
         
-        // Build a single command string to run grim for all monitors in parallel
-        // cmd: grim -o output1 path1 & grim -o output2 path2 & wait
         var cmd = "";
         for (var i = 0; i < root.monitors.length; i++) {
             var m = root.monitors[i];
             var path = root.tempPathBase + "_" + m.name + ".png";
-            // Ensure path is quoted safely
             cmd += `grim -o "${m.name}" "${path}" & `;
         }
         cmd += "wait";
@@ -295,8 +259,6 @@ QtObject {
                pad(d.getSeconds());
     }
 
-    // Modified processRegion to handle per-monitor cropping
-    // It finds the monitor for the given coords, loads THAT monitor's freeze file, and crops.
     function processRegion(x, y, w, h) {
         if (root.captureMode === "lens") {
             root.finalPath = root.lensPath;
@@ -308,21 +270,12 @@ QtObject {
             root.finalPath = root.screenshotsDir + "/" + filename
         }
         
-        // Find monitor for these global logical coordinates
         var m = null;
         if (root.monitors.length > 0) {
-            // Check which monitor contains the center of the region?
-            // Or the top-left? Top-left is safer.
-            // Note: monitor.x and monitor.y are logical position
-            // monitor.width is PHYSICAL width. logical width = width / scale
             m = root.monitors.find(mon => {
                 var logicalW = mon.width / mon.scale;
                 var logicalH = mon.height / mon.scale;
 
-				// When monitors are rotated, we use the height for width and vice versa
-				// 1 = 90 deg, 3 = 270 deg, 5 = 90 deg mirrored, 7 = 270 deg mirrored
-				// source: https://wiki.hypr.land/Configuring/Monitors/#rotating
-				// this way we select the correct monitor
 				if(mon.transform === 1 || mon.transform === 3 || mon.transform === 5 || mon.transform === 7) {
 					var logicalW  = mon.height / mon.scale;
 					var logicalH  = mon.width / mon.scale;
@@ -335,17 +288,13 @@ QtObject {
         
         if (!m) {
             console.warn("Screenshot: Could not find monitor for region " + x + "," + y);
-            // Fallback? Try to use first monitor?
             if (root.monitors.length > 0) m = root.monitors[0];
             else return; 
         }
         
-        // Calculate coordinates relative to that monitor
         var localX = x - m.x;
         var localY = y - m.y;
         
-        // Convert to physical coordinates for cropping the PHYSICAL grim output for THIS monitor
-        // Grim output for a single monitor is just size WxH (physical).
         var physX = Math.round(localX * m.scale);
         var physY = Math.round(localY * m.scale);
         var physW = Math.round(w * m.scale);
@@ -356,7 +305,6 @@ QtObject {
         
         var srcPath = root.tempPathBase + "_" + m.name + ".png";
         
-        // convert input.png -crop WxH+X+Y output.png
         var geom = `${physW}x${physH}+${physX}+${physY}`;
         cropProcess.command = ["convert", srcPath, "-crop", geom, root.finalPath];
         cropProcess.running = true;
@@ -373,34 +321,11 @@ QtObject {
             root.finalPath = root.screenshotsDir + "/" + filename
         }
 
-        // Fullscreen capture usually means "All Screens" or "Current Screen"?
-        // The previous implementation was "All Screens".
-        // But users usually want "Current Screen" if they click on a screen.
-        // However, if we want ALL screens stitched, we'd need to stitch them ourselves now.
-        // Let's assume the user clicked on a specific screen, so we capture THAT screen.
-        // We need to know WHICH screen was clicked. 
-        // But processFullscreen() takes no arguments currently.
-        // We should modify it to take a monitor name or coords.
-        
-        // For now, let's implement "Capture Monitor under Mouse" if possible?
-        // Or if we can't easily, maybe we just stitch them all?
-        // Stitching is complex. 
-        
-        // Let's try to infer from mouse position? We don't have it here.
-        // Let's assume the focused monitor?
-        // Let's default to primary or first monitor for safety if no context provided.
-        // Ideally, we update ScreenshotTool to pass the screen name.
-        
-        // TEMPORARY: Just capture the first monitor to verify the pipeline works.
-        // Or better: Re-run grim without -o to get the full stitched image again?
-        // That duplicates work but is safest for "Full Screenshot".
-        
         var cmd = ["grim", root.finalPath];
         cropProcess.command = cmd;
         cropProcess.running = true;
     }
     
-    // Overloaded processFullscreen to take a screen name (for "Screen" mode on specific monitor)
     function processMonitorScreen(monitorName) {
          if (root.captureMode === "lens") {
             root.finalPath = root.lensPath;
@@ -431,22 +356,217 @@ QtObject {
         openScreenshotsProcess.running = true;
     }
 
-    function runLensScript() {
-        var scriptPath = Qt.resolvedUrl("../../scripts/google_lens.sh").toString().replace("file://", "");
-        verifyImageProcess.command = ["test", "-f", root.lensPath];
-        verifyImageProcess.running = true;
+    property bool _lensBusy: false
+    property string _lensImageUrl: ""
+
+    property Process lensNotifyProcess: Process {
+        id: lensNotifyProcess
     }
-    
-    property Process verifyImageProcess: Process {
-        id: verifyImageProcess
+
+    function lensNotify(urgency, message) {
+        lensNotifyProcess.command = [
+            "notify-send",
+            "-u", urgency,
+            "Google Lens",
+            message
+        ]
+
+        lensNotifyProcess.startDetached()
+    }
+
+    function lensFailure(message, details) {
+        root._lensBusy = false
+
+        if (details && details.length > 0) {
+            console.warn("Screenshot: Google Lens: " + message + ": " + details)
+        } else {
+            console.warn("Screenshot: Google Lens: " + message)
+        }
+
+        root.lensNotify("critical", message)
+        root.errorOccurred(message)
+    }
+
+    function runLens() {
+        if (root._lensBusy) {
+            console.warn("Screenshot: Google Lens operation already in progress")
+            return
+        }
+
+        root._lensBusy = true
+
+        console.log("Screenshot: Verifying Lens image: " + root.lensPath)
+
+        lensVerifyProcess.command = [
+            "test",
+            "-r",
+            root.lensPath
+        ]
+
+        lensVerifyProcess.running = true
+    }
+
+
+    property Process lensVerifyProcess: Process {
+        id: lensVerifyProcess
+
         onExited: exitCode => {
-            if (exitCode === 0) {
-                var scriptPath = Qt.resolvedUrl("../../scripts/google_lens.sh").toString().replace("file://", "");
-                lensProcess.command = ["bash", scriptPath];
-                lensProcess.running = true;
-            } else {
-                root.errorOccurred("Image file not ready for Google Lens")
+            if (exitCode !== 0) {
+                root.lensFailure(
+                    "Image file not ready for Google Lens",
+                    root.lensPath
+                )
+                return
             }
+
+            root.lensNotify(
+                "normal",
+                "Uploading image for analysis..."
+            )
+
+            console.log("Screenshot: Uploading Lens image to uguu.se")
+
+            lensUploadProcess.command = [
+                "curl",
+                "-sS",
+                "-f",
+                "-F", "files[]=@" + root.lensPath,
+                "https://uguu.se/upload"
+            ]
+
+            lensUploadProcess.running = true
+        }
+    }
+
+    property Process lensUploadProcess: Process {
+        id: lensUploadProcess
+
+        stdout: StdioCollector {}
+        stderr: StdioCollector {}
+
+        onExited: exitCode => {
+            if (exitCode !== 0) {
+                var error = lensUploadProcess.stderr.text.trim()
+
+                root.lensFailure(
+                    "Failed to upload image",
+                    error.length > 0
+                        ? error
+                        : "curl exited with code " + exitCode
+                )
+
+                return
+            }
+
+            var response
+
+            try {
+                response = JSON.parse(
+                    lensUploadProcess.stdout.text
+                )
+            } catch (e) {
+                root.lensFailure(
+                    "Failed to parse upload response",
+                    e.message + "\nResponse: "
+                        + lensUploadProcess.stdout.text
+                )
+
+                return
+            }
+
+            if (!response
+                    || !response.files
+                    || response.files.length === 0
+                    || !response.files[0].url) {
+                root.lensFailure(
+                    "Upload response did not contain an image URL",
+                    lensUploadProcess.stdout.text
+                )
+
+                return
+            }
+
+            root._lensImageUrl = response.files[0].url
+
+            console.log(
+                "Screenshot: Image uploaded successfully: "
+                + root._lensImageUrl
+            )
+
+            var lensUrl =
+                "https://lens.google.com/uploadbyurl?url="
+                + encodeURIComponent(root._lensImageUrl)
+
+            console.log(
+                "Screenshot: Opening Google Lens: "
+                + lensUrl
+            )
+
+            lensOpenProcess.command = [
+                "xdg-open",
+                lensUrl
+            ]
+
+            lensOpenProcess.running = true
+        }
+    }
+
+    property Process lensOpenProcess: Process {
+        id: lensOpenProcess
+
+        stderr: StdioCollector {}
+
+        onExited: exitCode => {
+            if (exitCode !== 0) {
+                root.lensFailure(
+                    "Failed to open Google Lens",
+                    lensOpenProcess.stderr.text.trim()
+                )
+
+                return
+            }
+
+            lensCleanupProcess.command = [
+                "rm",
+                "-f",
+                root.lensPath
+            ]
+
+            lensCleanupProcess.running = true
+        }
+    }
+
+    property Process lensCleanupProcess: Process {
+        id: lensCleanupProcess
+
+        stderr: StdioCollector {}
+
+        onExited: exitCode => {
+            root._lensBusy = false
+
+            if (exitCode !== 0) {
+                var error = lensCleanupProcess.stderr.text.trim()
+
+                console.warn(
+                    "Screenshot: Google Lens opened, but temporary "
+                    + "image cleanup failed: " + error
+                )
+
+                root.errorOccurred(
+                    "Google Lens opened, but failed to remove temporary image"
+                )
+
+                return
+            }
+
+            root.lensNotify(
+                "normal",
+                "Image opened in browser successfully"
+            )
+
+            console.log(
+                "Screenshot: Google Lens opened successfully"
+            )
         }
     }
 }
