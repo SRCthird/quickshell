@@ -89,7 +89,7 @@ Using `qs` may prevent the `Exit Shell` and `Reload Shell` keybinds from working
 │   └── *.js              # Config domain helpers
 ├── modules/
 │   ├── config/           # Config singleton and JSON defaults
-│   │   └── defaults/*.js # Default values for each config domain
+│   │   └── adapters/     # Default values for each config domain
 │   ├── bar/              # Panel widgets: clock, systray, workspaces, indicators
 │   ├── components/       # Reusable UI primitives and GLSL shaders
 │   ├── corners/          # Rounded screen-corner overlay
@@ -105,7 +105,6 @@ Using `qs` may prevent the `Exit Shell` and `Reload Shell` keybinds from working
 │   ├── theme/            # Colors, icons, and styling singletons
 │   ├── tools/            # Screenshot, recording, mirror, and picker tools
 │   └── widgets/          # Dashboard, launcher, overview, powermenu, presets, etc.
-├── scripts/              # Python and Bash backends
 └── shell.qml             # Main entry point
 ```
 
