@@ -1,7 +1,9 @@
 pragma Singleton
+
 import QtQuick
+import QtQml
 import Quickshell
-import Quickshell.Io
+
 import qs.modules.config
 import qs.modules.globals
 
@@ -35,26 +37,59 @@ Singleton {
     property real debugHour: 12.0  // 0-24 hour (e.g. 14.5 = 2:30 PM)
     property int debugWeatherCode: 0
 
-    // Script path
-    readonly property string scriptPath: Quickshell.shellDir + "/scripts/weather.sh"
-
     // Retry logic
     property int retryCount: 0
     readonly property int maxRetries: 3
-    property bool wasCancelled: false
+
+    // HTTP request state
+    property var activeRequest: null
+    property var activeFailureCallback: null
+    property int activeRequestGeneration: -1
+    property int requestGeneration: 0
+
+    readonly property int requestTimeoutMs: 15000
 
     property var suspendConnections: Connections {
         target: SuspendManager
+
         function onPreparingForSleep() {
-            if (weatherProcess.running) {
-                root.wasCancelled = true;
-                weatherProcess.running = false;
-            }
-            if (retryTimer) retryTimer.stop();
+            root.cancelActiveRequest();
+
+            if (retryTimer)
+                retryTimer.stop();
+
+            root.isLoading = false;
         }
+
         function onWakingUp() {
-            // Delay refresh on wake to allow network to stabilize
-            if (wakeRefreshTimer) wakeRefreshTimer.restart();
+            if (wakeRefreshTimer)
+                wakeRefreshTimer.restart();
+        }
+    }
+
+    property Timer requestTimeoutTimer: Timer {
+        interval: root.requestTimeoutMs
+        repeat: false
+
+        onTriggered: {
+            var xhr = root.activeRequest;
+            var failure = root.activeFailureCallback;
+            var generation = root.activeRequestGeneration;
+
+            root.activeRequest = null;
+            root.activeFailureCallback = null;
+            root.activeRequestGeneration = -1;
+
+            if (xhr) {
+                try {
+                    xhr.abort();
+                } catch (e) {
+                    // Request may already have terminated.
+                }
+            }
+
+            if (generation === root.requestGeneration && failure)
+                failure("Request timed out");
         }
     }
 
@@ -380,112 +415,400 @@ Singleton {
         }
     }
 
-    property Process weatherProcess: Process {
-        running: false
-        command: []
+    function cancelActiveRequest() {
+        // Invalidates callbacks from all requests belonging to the old update.
+        root.requestGeneration++;
 
-        stdout: StdioCollector {
-            waitForEnd: true
-            onStreamFinished: {
-                // Skip processing if we cancelled this request
-                if (root.wasCancelled) {
+        requestTimeoutTimer.stop();
+
+        var xhr = root.activeRequest;
+
+        root.activeRequest = null;
+        root.activeFailureCallback = null;
+        root.activeRequestGeneration = -1;
+
+        if (xhr) {
+            try {
+                xhr.abort();
+            } catch (e) {
+                // The request may have already completed.
+            }
+        }
+    }
+
+    function httpGetJson(url, generation, onSuccess, onFailure) {
+        if (generation !== root.requestGeneration)
+            return;
+
+        var xhr = new XMLHttpRequest();
+
+        root.activeRequest = xhr;
+        root.activeFailureCallback = onFailure;
+        root.activeRequestGeneration = generation;
+
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE)
+                return;
+
+            // Ignore stale requests.
+            if (generation !== root.requestGeneration)
+                return;
+
+            // If this is no longer the active request, it was cancelled or timed out.
+            if (root.activeRequest !== xhr)
+                return;
+
+            requestTimeoutTimer.stop();
+
+            root.activeRequest = null;
+            root.activeFailureCallback = null;
+            root.activeRequestGeneration = -1;
+
+            if (xhr.status < 200 || xhr.status >= 300) {
+                var errorMessage = "HTTP request failed with status " + xhr.status;
+
+                // Open-Meteo returns useful JSON errors for invalid requests.
+                if (xhr.responseText) {
+                    try {
+                        var errorData = JSON.parse(xhr.responseText);
+
+                        if (errorData.reason)
+                            errorMessage = errorData.reason;
+                        else if (errorData.error && typeof errorData.error === "string")
+                            errorMessage = errorData.error;
+                    } catch (e) {
+                        // Keep the generic HTTP error.
+                    }
+                }
+
+                onFailure(errorMessage);
+                return;
+            }
+
+            if (!xhr.responseText || xhr.responseText.trim().length === 0) {
+                onFailure("Empty HTTP response");
+                return;
+            }
+
+            try {
+                var data = JSON.parse(xhr.responseText);
+                onSuccess(data);
+            } catch (e) {
+                onFailure("Invalid JSON response: " + e);
+            }
+        };
+
+        try {
+            xhr.open("GET", url, true);
+            xhr.setRequestHeader("Accept", "application/json");
+
+            requestTimeoutTimer.restart();
+            xhr.send();
+        } catch (e) {
+            requestTimeoutTimer.stop();
+
+            if (root.activeRequest === xhr) {
+                root.activeRequest = null;
+                root.activeFailureCallback = null;
+                root.activeRequestGeneration = -1;
+            }
+
+            onFailure("Could not start HTTP request: " + e);
+        }
+    }
+
+    function requestFailed(message, generation) {
+        if (generation !== root.requestGeneration)
+            return;
+
+        console.warn("WeatherService:", message);
+
+        root.dataAvailable = false;
+        root.handleError();
+    }
+
+    function parseCoordinates(location) {
+        // Supports:
+        //   40.7128,-74.0060
+        //   40.7128, -74.0060
+        //   -33.8688,151.2093
+        var match = location.match(
+            /^\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*$/
+        );
+
+        if (!match)
+            return null;
+
+        var latitude = parseFloat(match[1]);
+        var longitude = parseFloat(match[2]);
+
+        if (!isFinite(latitude) || !isFinite(longitude))
+            return null;
+
+        if (latitude < -90 || latitude > 90)
+            return null;
+
+        if (longitude < -180 || longitude > 180)
+            return null;
+
+        return {
+            latitude: latitude,
+            longitude: longitude
+        };
+    }
+
+    function fetchGeoIp(generation) {
+        console.log("WeatherService: Resolving location using GeoIP");
+
+        httpGetJson(
+            "https://ipapi.co/json/",
+            generation,
+
+            function(data) {
+                if (generation !== root.requestGeneration)
+                    return;
+
+                var latitude = parseFloat(data.latitude);
+                var longitude = parseFloat(data.longitude);
+
+                if (!isFinite(latitude) || !isFinite(longitude)) {
+                    root.requestFailed(
+                        "Could not determine location from GeoIP",
+                        generation
+                    );
                     return;
                 }
 
-                var raw = text.trim();
-                if (raw.length > 0) {
-                    try {
-                        var data = JSON.parse(raw);
+                root.fetchWeatherAtCoordinates(
+                    latitude,
+                    longitude,
+                    generation
+                );
+            },
 
-                        // Check for error from script
-                        if (data.error) {
-                            console.warn("WeatherService:", data.error);
-                            root.dataAvailable = false;
-                            root.handleError();
-                            return;
-                        }
+            function(error) {
+                root.requestFailed(
+                    "GeoIP request failed: " + error,
+                    generation
+                );
+            }
+        );
+    }
 
-                        if (data.current_weather && data.daily) {
-                            var weather = data.current_weather;
-                            var daily = data.daily;
+    function geocodeLocation(location, generation) {
+        console.log("WeatherService: Geocoding '" + location + "'");
 
-                            root.weatherCode = parseInt(weather.weathercode);
-                            root.currentTemp = convertTemp(parseFloat(weather.temperature));
-                            root.windSpeed = parseFloat(weather.windspeed);
+        var url =
+            "https://geocoding-api.open-meteo.com/v1/search" +
+            "?name=" + encodeURIComponent(location) +
+            "&count=1" +
+            "&format=json";
 
-                            if (daily.temperature_2m_max && daily.temperature_2m_max.length > 0) {
-                                root.maxTemp = convertTemp(parseFloat(daily.temperature_2m_max[0]));
-                            }
-                            if (daily.temperature_2m_min && daily.temperature_2m_min.length > 0) {
-                                root.minTemp = convertTemp(parseFloat(daily.temperature_2m_min[0]));
-                            }
+        httpGetJson(
+            url,
+            generation,
 
-                            if (daily.sunrise && daily.sunrise.length > 0) {
-                                root.sunrise = daily.sunrise[0].split("T")[1];
-                            }
-                            if (daily.sunset && daily.sunset.length > 0) {
-                                root.sunset = daily.sunset[0].split("T")[1];
-                            }
+            function(data) {
+                if (generation !== root.requestGeneration)
+                    return;
 
-                            // Parse 7-day forecast
-                            var forecastData = [];
-                            var dayCount = Math.min(7, daily.time ? daily.time.length : 0);
-                            for (var i = 0; i < dayCount; i++) {
-                                // Manual date parse to avoid UTC midnight issues
-                                // "YYYY-MM-DD"
-                                var dateParts = daily.time[i].split("-");
-                                var year = parseInt(dateParts[0]);
-                                var month = parseInt(dateParts[1]) - 1; // 0-indexed months
-                                var day = parseInt(dateParts[2]);
-                                
-                                var dayDate = new Date(year, month, day);
-                                var rawDayName = i === 0 ? "Today" : dayDate.toLocaleDateString(Qt.locale(), "ddd");
-                                var dayName = rawDayName.charAt(0).toUpperCase() + rawDayName.slice(1);
-                                forecastData.push({
-                                    date: daily.time[i],
-                                    dayName: dayName,
-                                    weatherCode: daily.weathercode ? daily.weathercode[i] : 0,
-                                    emoji: getWeatherCodeEmoji(daily.weathercode ? daily.weathercode[i] : 0),
-                                    maxTemp: convertTemp(daily.temperature_2m_max ? daily.temperature_2m_max[i] : 0),
-                                    minTemp: convertTemp(daily.temperature_2m_min ? daily.temperature_2m_min[i] : 0)
-                                });
-                            }
-                            root.forecast = forecastData;
-
-                            root.weatherSymbol = getWeatherCodeEmoji(root.weatherCode);
-                            root.weatherDescription = getWeatherDescription(root.weatherCode);
-                            root.calculateSunPosition();
-                            root.dataAvailable = true;
-                            root.isLoading = false;
-                            root.hasFailed = false;
-                            root.retryCount = 0;
-                        } else {
-                            console.warn("WeatherService: Invalid response structure");
-                            root.dataAvailable = false;
-                            root.handleError();
-                        }
-                    } catch (e) {
-                        console.warn("WeatherService: JSON parse error:", e);
-                        root.dataAvailable = false;
-                        root.handleError();
-                    }
-                } else {
-                    console.warn("WeatherService: Empty response");
-                    root.handleError();
+                if (!data.results || data.results.length === 0) {
+                    root.requestFailed(
+                        "Location not found: " + location,
+                        generation
+                    );
+                    return;
                 }
+
+                var result = data.results[0];
+
+                var latitude = parseFloat(result.latitude);
+                var longitude = parseFloat(result.longitude);
+
+                if (!isFinite(latitude) || !isFinite(longitude)) {
+                    root.requestFailed(
+                        "Invalid coordinates returned for location: " + location,
+                        generation
+                    );
+                    return;
+                }
+
+                root.fetchWeatherAtCoordinates(
+                    latitude,
+                    longitude,
+                    generation
+                );
+            },
+
+            function(error) {
+                root.requestFailed(
+                    "Geocoding request failed: " + error,
+                    generation
+                );
             }
+        );
+    }
+
+    function fetchWeatherAtCoordinates(latitude, longitude, generation) {
+        if (generation !== root.requestGeneration)
+            return;
+
+        console.log(
+            "WeatherService: Fetching weather for "
+            + latitude + "," + longitude
+        );
+
+        var url =
+            "https://api.open-meteo.com/v1/forecast" +
+            "?latitude=" + encodeURIComponent(latitude) +
+            "&longitude=" + encodeURIComponent(longitude) +
+            "&current=temperature_2m,weather_code,wind_speed_10m" +
+            "&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,weather_code" +
+            "&timezone=auto" +
+            "&forecast_days=7";
+
+        httpGetJson(
+            url,
+            generation,
+
+            function(data) {
+                root.processWeatherData(data, generation);
+            },
+
+            function(error) {
+                root.requestFailed(
+                    "Weather API request failed: " + error,
+                    generation
+                );
+            }
+        );
+    }
+
+    function processWeatherData(data, generation) {
+        if (generation !== root.requestGeneration)
+            return;
+
+        if (!data.current || !data.daily) {
+            root.requestFailed(
+                "Invalid weather API response",
+                generation
+            );
+            return;
         }
 
-        onExited: function (code) {
-            // SIGTERM (15) = intentional cancellation
-            if (code !== 0 && code !== 15) {
-                console.warn("WeatherService: Script exited with code", code);
-                root.dataAvailable = false;
-                root.handleError();
-            }
-            // Reset cancelled flag after process fully exits
-            root.wasCancelled = false;
+        var weather = data.current;
+        var daily = data.daily;
+
+        var currentTemperature = parseFloat(weather.temperature_2m);
+        var currentWeatherCode = parseInt(weather.weather_code);
+        var currentWindSpeed = parseFloat(weather.wind_speed_10m);
+
+        if (isNaN(currentTemperature) || isNaN(currentWeatherCode)) {
+            root.requestFailed(
+                "Current weather data is incomplete",
+                generation
+            );
+            return;
         }
+
+        root.weatherCode = currentWeatherCode;
+        root.currentTemp = root.convertTemp(currentTemperature);
+        root.windSpeed = isNaN(currentWindSpeed) ? 0 : currentWindSpeed;
+
+        if (daily.temperature_2m_max &&
+            daily.temperature_2m_max.length > 0) {
+            root.maxTemp = root.convertTemp(
+                parseFloat(daily.temperature_2m_max[0])
+            );
+        }
+
+        if (daily.temperature_2m_min &&
+            daily.temperature_2m_min.length > 0) {
+            root.minTemp = root.convertTemp(
+                parseFloat(daily.temperature_2m_min[0])
+            );
+        }
+
+        if (daily.sunrise && daily.sunrise.length > 0) {
+            var sunriseParts = daily.sunrise[0].split("T");
+            root.sunrise = sunriseParts.length > 1
+                ? sunriseParts[1]
+                : "";
+        }
+
+        if (daily.sunset && daily.sunset.length > 0) {
+            var sunsetParts = daily.sunset[0].split("T");
+            root.sunset = sunsetParts.length > 1
+                ? sunsetParts[1]
+                : "";
+        }
+
+        // Parse 7-day forecast
+        var forecastData = [];
+        var dayCount = Math.min(
+            7,
+            daily.time ? daily.time.length : 0
+        );
+
+        for (var i = 0; i < dayCount; i++) {
+            // Parse YYYY-MM-DD manually so the date is interpreted
+            // in local time instead of as UTC midnight.
+            var dateParts = daily.time[i].split("-");
+
+            var year = parseInt(dateParts[0]);
+            var month = parseInt(dateParts[1]) - 1;
+            var day = parseInt(dateParts[2]);
+
+            var dayDate = new Date(year, month, day);
+
+            var rawDayName = i === 0
+                ? "Today"
+                : dayDate.toLocaleDateString(Qt.locale(), "ddd");
+
+            var dayName =
+                rawDayName.charAt(0).toUpperCase()
+                + rawDayName.slice(1);
+
+            var forecastWeatherCode =
+                daily.weather_code &&
+                daily.weather_code[i] !== undefined
+                    ? parseInt(daily.weather_code[i])
+                    : 0;
+
+            var dayMax =
+                daily.temperature_2m_max &&
+                daily.temperature_2m_max[i] !== undefined
+                    ? parseFloat(daily.temperature_2m_max[i])
+                    : 0;
+
+            var dayMin =
+                daily.temperature_2m_min &&
+                daily.temperature_2m_min[i] !== undefined
+                    ? parseFloat(daily.temperature_2m_min[i])
+                    : 0;
+
+            forecastData.push({
+                date: daily.time[i],
+                dayName: dayName,
+                weatherCode: forecastWeatherCode,
+                emoji: root.getWeatherCodeEmoji(forecastWeatherCode),
+                maxTemp: root.convertTemp(dayMax),
+                minTemp: root.convertTemp(dayMin)
+            });
+        }
+
+        root.forecast = forecastData;
+
+        root.weatherSymbol = root.getWeatherCodeEmoji(root.weatherCode);
+        root.weatherDescription =
+            root.getWeatherDescription(root.weatherCode);
+
+        root.calculateSunPosition();
+
+        root.dataAvailable = true;
+        root.isLoading = false;
+        root.hasFailed = false;
+        root.retryCount = 0;
     }
 
     // Watch for config changes
@@ -494,27 +817,13 @@ Singleton {
     readonly property string configUnit: weatherConfig ? weatherConfig.unit : "C"
     property bool _initialized: false
 
-    onConfigLocationChanged: {
-        if (!_initialized) return;
-        console.log("WeatherService: Location changed to '" + configLocation + "'");
-        Qt.callLater(() => { updateWeather(); });
-    }
-    onConfigUnitChanged: {
-        if (!_initialized) return;
-        console.log("WeatherService: Unit changed to '" + configUnit + "'");
-        Qt.callLater(() => { updateWeather(); });
-    }
-
     function updateWeather() {
-        // Cancel existing process if running
-        if (weatherProcess.running) {
-            root.wasCancelled = true;
-            weatherProcess.running = false;
-        }
+        // Stop any previous request and invalidate its callbacks.
+        root.cancelActiveRequest();
 
-        // Safety check for config
         if (!Config.weather) {
             console.warn("WeatherService: Config.weather is null");
+            root.isLoading = false;
             return;
         }
 
@@ -523,11 +832,34 @@ Singleton {
 
         var locationStr = Config.weather.location || "";
         var location = locationStr.trim();
-        
-        console.log("WeatherService: Fetching weather for '" + location + "'");
-        
-        weatherProcess.command = [scriptPath, location];
-        weatherProcess.running = true;
+
+        // cancelActiveRequest() advanced the generation.
+        var generation = root.requestGeneration;
+
+        console.log(
+            "WeatherService: Fetching weather for '" + location + "'"
+        );
+
+        // Empty location means automatic GeoIP location.
+        if (location.length === 0) {
+            root.fetchGeoIp(generation);
+            return;
+        }
+
+        // Explicit latitude/longitude.
+        var coordinates = root.parseCoordinates(location);
+
+        if (coordinates) {
+            root.fetchWeatherAtCoordinates(
+                coordinates.latitude,
+                coordinates.longitude,
+                generation
+            );
+            return;
+        }
+
+        // Otherwise treat the value as a city/location name.
+        root.geocodeLocation(location, generation);
     }
 
     Timer {
@@ -541,5 +873,39 @@ Singleton {
         var now = new Date();
         currentHour = now.getHours() + now.getMinutes() / 60;
         _initialized = true;
+    }
+
+    onConfigLocationChanged: {
+        if (!_initialized)
+            return;
+
+        console.log(
+            "WeatherService: Location changed to '" +
+            configLocation + "'"
+        );
+
+        retryTimer.stop();
+        retryCount = 0;
+
+        Qt.callLater(function() {
+            root.updateWeather();
+        });
+    }
+
+    onConfigUnitChanged: {
+        if (!_initialized)
+            return;
+
+        console.log(
+            "WeatherService: Unit changed to '" +
+            configUnit + "'"
+        );
+
+        retryTimer.stop();
+        retryCount = 0;
+
+        Qt.callLater(function() {
+            root.updateWeather();
+        });
     }
 }
