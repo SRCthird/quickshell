@@ -1,11 +1,13 @@
 import QtQuick
+import QtCore
+
+import Quickshell
+import Quickshell.Io
+
 import qs.modules.components
 import qs.modules.theme
 import qs.modules.globals
-import Quickshell.Io
-
 import qs.modules.services
-import qs.modules.config
 
 ActionGrid {
     id: root
@@ -14,23 +16,46 @@ ActionGrid {
 
     QtObject {
         id: recordAction
-        property string icon: ScreenRecorder.isRecording ? Icons.stop : Icons.recordScreen
-        property string text: ScreenRecorder.isRecording ? ScreenRecorder.duration : ""
-        property string tooltip: ScreenRecorder.isRecording ? "Stop Recording" : "Screen Recorder"
+
+        property string icon: ScreenRecorder.isRecording
+            ? Icons.stop
+            : Icons.recordScreen
+
+        property string text: ScreenRecorder.isRecording
+            ? ScreenRecorder.duration
+            : ""
+
+        property string tooltip: ScreenRecorder.isRecording
+            ? "Stop Recording"
+            : "Screen Recorder"
+
         property string command: ""
-        property string variant: ScreenRecorder.isRecording ? "error" : "primary"
+
+        property string variant: ScreenRecorder.isRecording
+            ? "error"
+            : "primary"
+
         property string type: "button"
     }
 
     QtObject {
-      id: motionCueAction
+        id: motionCueAction
 
-      property string icon: MotionCues.enabled ? Icons.waveform : Icons.dotsNine
-      property string text: MotionCues.enabled ? "On" : ""
-      property string tooltip: MotionCues.enabled ? "Disable Motion Cues" : "Enable Motion Cues"
-      property string command: ""
-      property string variant: MotionCues.enabled ? "primary" : ""
-      property string type: "button"
+        property string icon: MotionCues.enabled
+            ? Icons.waveform
+            : Icons.dotsNine
+
+        property string text: MotionCues.enabled
+            ? "On"
+            : ""
+
+        property string tooltip: MotionCues.enabled
+            ? "Disable Motion Cues"
+            : "Enable Motion Cues"
+
+        property string command: ""
+        property string variant: MotionCues.enabled ? "primary" : ""
+        property string type: "button"
     }
 
     layout: "row"
@@ -82,93 +107,128 @@ ActionGrid {
             command: ""
         },
         {
-            icon: GlobalStates.mirrorWindowVisible ? Icons.webcamSlash : Icons.webcam,
+            icon: GlobalStates.mirrorWindowVisible
+                ? Icons.webcamSlash
+                : Icons.webcam,
+
             tooltip: "Mirror",
             command: ""
         },
         motionCueAction
     ]
 
-    Process {
-        id: ocrProc
+    function localPath(url) {
+        var path = url.toString();
+
+        if (path.startsWith("file://"))
+            path = path.substring(7);
+
+        return decodeURIComponent(path);
+    }
+
+    function openUserFolder(location, subdirectory) {
+        var base = localPath(
+            StandardPaths.writableLocation(location)
+        );
+
+        if (base === "") {
+            console.warn("Could not resolve user directory");
+            return;
+        }
+
+        var path = base + "/" + subdirectory;
+
+        folderProc.targetPath = path;
+        folderProc.exec([
+            "mkdir",
+            "-p",
+            path
+        ]);
     }
 
     Process {
-        id: qrProc
-    }
+        id: folderProc
 
-    Process {
-        id: openFolderProc
-        command: ["bash", "-c", "nohup xdg-open \"$0\" > /dev/null 2>&1 &"]
+        property string targetPath: ""
+
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                console.warn(
+                    "Failed to create directory:",
+                    targetPath
+                );
+
+                return;
+            }
+
+            Quickshell.execDetached([
+                "xdg-open",
+                targetPath
+            ]);
+        }
     }
 
     onActionTriggered: action => {
-        console.log("Tools action triggered:", action.tooltip);
+        console.log(
+            "Tools action triggered:",
+            action.tooltip
+        );
 
         if (action.tooltip === "Screenshot") {
             Screenshot.initialize();
             GlobalStates.screenshotToolVisible = true;
             root.itemSelected();
+
         } else if (action.tooltip === "Screen Recorder") {
             ScreenRecorder.initialize();
             GlobalStates.screenRecordToolVisible = true;
             root.itemSelected();
+
         } else if (action.tooltip === "Stop Recording") {
             ScreenRecorder.toggleRecording();
             root.itemSelected();
+
         } else if (action.tooltip === "Open Screenshots") {
-            var cmd = "dir=\"$(xdg-user-dir PICTURES)/Screenshots\"; mkdir -p \"$dir\"; nohup xdg-open \"$dir\" > /dev/null 2>&1 &";
-            
-            openFolderProc.command = ["bash", "-c", cmd];
-            openFolderProc.running = true;
-            
+            root.openUserFolder(
+                StandardPaths.PicturesLocation,
+                "Screenshots"
+            );
+
             root.itemSelected();
+
         } else if (action.tooltip === "Open Recordings") {
-            var cmd = "dir=\"$(xdg-user-dir VIDEOS)/Recordings\"; mkdir -p \"$dir\"; nohup xdg-open \"$dir\" > /dev/null 2>&1 &";
-            
-            openFolderProc.command = ["bash", "-c", cmd];
-            openFolderProc.running = true;
-            
-             root.itemSelected();
+            root.openUserFolder(
+                StandardPaths.MoviesLocation,
+                "Recordings"
+            );
+
+            root.itemSelected();
+
         } else if (action.tooltip === "Color Picker") {
             ColorPicker.pick();
             root.itemSelected();
-        } else if (action.tooltip === "OCR") {
-            var scriptPath = Qt.resolvedUrl("../../../scripts/ocr.sh").toString().replace("file://", "");
-            
-            var ocrConfig = Config.system.ocr;
-            var langs = [];
-            
-            if (ocrConfig) {
-                if (ocrConfig.eng !== false) langs.push("eng");
-                if (ocrConfig.spa !== false) langs.push("spa");
-                if (ocrConfig.lat === true) langs.push("lat");
-                if (ocrConfig.jpn === true) langs.push("jpn");
-                if (ocrConfig.chi_sim === true) langs.push("chi_sim");
-                if (ocrConfig.chi_tra === true) langs.push("chi_tra");
-                if (ocrConfig.kor === true) langs.push("kor");
-            } else {
-                langs = ["eng", "spa"];
-            }
-            
-            if (langs.length === 0) langs.push("eng");
-            var langString = langs.join("+");
 
-            ocrProc.command = ["bash", "-c", "nohup \"" + scriptPath + "\" \"" + langString + "\" > /dev/null 2>&1 &"];
-            ocrProc.running = true;
+        } else if (action.tooltip === "OCR") {
             root.itemSelected();
+            OCRService.scan();
+
         } else if (action.tooltip === "QR Code") {
-            var scriptPath = Qt.resolvedUrl("../../../scripts/qr_scan.sh").toString().replace("file://", "");
-            qrProc.command = ["bash", "-c", "nohup \"" + scriptPath + "\" > /dev/null 2>&1 &"];
-            qrProc.running = true;
             root.itemSelected();
+            QRService.scan();
+
         } else if (action.tooltip === "Google Lens") {
             Screenshot.captureMode = "lens";
             GlobalStates.screenshotToolVisible = true;
             root.itemSelected();
+
         } else if (action.tooltip === "Mirror") {
-            GlobalStates.mirrorWindowVisible = !GlobalStates.mirrorWindowVisible;
-        } else if (action.tooltip === "Enable Motion Cues" || action.tooltip === "Disable Motion Cues") {
+            GlobalStates.mirrorWindowVisible =
+                !GlobalStates.mirrorWindowVisible;
+
+        } else if (
+            action.tooltip === "Enable Motion Cues"
+            || action.tooltip === "Disable Motion Cues"
+        ) {
             MotionCues.toggle();
         }
     }
