@@ -110,6 +110,25 @@ Item {
         return workspaceGroup * Config.workspaces.shown + index + 1;
     }
 
+    function appIconForWindow(window) {
+        if (!window || !window.class)
+            return Quickshell.iconPath("image-missing");
+
+        const className = window.class;
+
+        let entry = DesktopEntries.byId(className);
+        if (!entry)
+            entry = DesktopEntries.heuristicLookup(className);
+
+        if (entry && entry.icon)
+            return Quickshell.iconPath(entry.icon, "image-missing");
+
+        return Quickshell.iconPath(
+            AppSearch.getCachedIcon(className),
+            "image-missing"
+        );
+    }
+
     Timer {
         id: updateTimer
         interval: 100
@@ -429,7 +448,7 @@ Item {
                             return winFocus < bestFocus ? win : best;
                         }, null);
                     }
-                    property var mainAppIconSource: Quickshell.iconPath(AppSearch.getCachedIcon((focusedWindow ? focusedWindow.class : undefined)), "image-missing")
+                    property var mainAppIconSource: workspacesWidget.appIconForWindow(focusedWindow)
 
                     Text {
                         opacity: Config.workspaces.alwaysShowNumbers || ((Config.workspaces.showNumbers && (!Config.workspaces.showAppIcons || !workspaceButtonBackground.focusedWindow || Config.workspaces.alwaysShowNumbers)) || (Config.workspaces.alwaysShowNumbers && !Config.workspaces.showAppIcons)) ? 1 : 0
@@ -561,7 +580,7 @@ Item {
                             return winFocus < bestFocus ? win : best;
                         }, null);
                     }
-                    property var mainAppIconSource: Quickshell.iconPath(AppSearch.getCachedIcon((focusedWindow ? focusedWindow.class : undefined)), "image-missing")
+                    property var mainAppIconSource: workspacesWidget.appIconForWindow(focusedWindow)
 
                     Text {
                         opacity: Config.workspaces.alwaysShowNumbers || ((Config.workspaces.showNumbers && (!Config.workspaces.showAppIcons || !workspaceButtonBackgroundVert.focusedWindow || Config.workspaces.alwaysShowNumbers)) || (Config.workspaces.alwaysShowNumbers && !Config.workspaces.showAppIcons)) ? 1 : 0

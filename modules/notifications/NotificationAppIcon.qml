@@ -11,6 +11,7 @@ Item {
     id: root
     property var appIcon: ""
     property string appName: ""
+    property string desktopEntry: ""
     property var summary: ""
     property var urgency: NotificationUrgency.Normal
     property var image: ""
@@ -26,7 +27,51 @@ Item {
     implicitHeight: size
     property real radius: Styling.radius(-8)
 
-    // Contenedor principal con recorte (Clipping)
+    function resolveIconSource(icon) {
+        if (!icon)
+            return "";
+
+        const value = String(icon);
+
+        if (value.startsWith("file://")
+                || value.startsWith("data:")
+                || value.startsWith("http://")
+                || value.startsWith("https://")) {
+            return value;
+        }
+
+        if (value.startsWith("/"))
+            return "file://" + value;
+
+        return Quickshell.iconPath(value, "image-missing");
+    }
+
+    function resolveDesktopEntryIcon() {
+        let entry = null;
+        let id = root.desktopEntry || "";
+
+        if (id.endsWith(".desktop"))
+            id = id.slice(0, -8);
+
+        if (id)
+            entry = DesktopEntries.byId(id);
+
+        if (!entry && root.appName)
+            entry = DesktopEntries.heuristicLookup(root.appName);
+
+        if (entry && entry.icon)
+            return Quickshell.iconPath(entry.icon, "image-missing");
+
+        return Quickshell.iconPath("image-missing");
+    }
+
+    function appIconSource() {
+        if (root.appIcon)
+            return resolveIconSource(root.appIcon);
+
+        return resolveDesktopEntryIcon();
+    }
+
     ClippingRectangle {
         anchors.fill: parent
         radius: root.radius
@@ -72,20 +117,27 @@ Item {
 
         Loader {
             id: appIconLoader
-            active: root.image == "" && root.appIcon != ""
+            active: root.image == "" && (root.appIcon != "" || root.desktopEntry != "" || root.appName != "")
             anchors.fill: parent
             visible: item && item.status !== Image.Error
             sourceComponent: Image {
                 mipmap: true
                 id: appIconImage
+                property bool triedDesktopFallback: false
                 anchors.fill: parent
-                source: root.appIcon ? "image://icon/" + root.appIcon : ""
+                source: root.appIconSource()
                 fillMode: Image.PreserveAspectCrop
                 smooth: true
+
+                onStatusChanged: {
+                    if (status === Image.Error && !triedDesktopFallback) {
+                        triedDesktopFallback = true;
+                        source = root.resolveDesktopEntryIcon();
+                    }
+                }
             }
         }
 
-        // Mostrar imagen de notificación si existe
         Loader {
             id: notifImageLoader
             active: root.image != ""
@@ -102,14 +154,29 @@ Item {
                     Image {
                         mipmap: true
                         id: notifImage
+                        property bool triedAppIconFallback: false
+                        property bool triedDesktopFallback: false
+
                         anchors.fill: parent
-                        source: status === Image.Error && root.appIcon ? "image://icon/" + root.appIcon : root.image
+                        source: root.image
                         fillMode: Image.PreserveAspectCrop
                         smooth: true
+
                         onStatusChanged: {
-                            if (status === Image.Error && root.appIcon) {
-                                source = "image://icon/" + root.appIcon;
+                            if (status !== Image.Error)
+                                return;
+
+                            if (!triedAppIconFallback && root.appIcon) {
+                                triedAppIconFallback = true;
                                 root.usingAppIconFallback = true;
+                                source = root.resolveIconSource(root.appIcon);
+                                return;
+                            }
+
+                            if (!triedDesktopFallback) {
+                                triedDesktopFallback = true;
+                                root.usingAppIconFallback = true;
+                                source = root.resolveDesktopEntryIcon();
                             }
                         }
                     }
@@ -118,22 +185,30 @@ Item {
         }
     }
 
-    // App icon pequeño superpuesto si hay imagen
     Loader {
         id: notifImageAppIconLoader
-        active: root.image != "" && root.appIcon != "" && !root.usingAppIconFallback
+        active: root.image != "" && (root.appIcon != "" || root.desktopEntry != "" || root.appName != "") && !root.usingAppIconFallback
         anchors.bottom: parent.bottom
         anchors.right: parent.right
         width: root.smallAppIconSize
         height: root.smallAppIconSize
         sourceComponent: Rectangle {
             color: "transparent"
+
             Image {
                 mipmap: true
+                property bool triedDesktopFallback: false
                 anchors.fill: parent
-                source: root.appIcon ? "image://icon/" + root.appIcon : ""
+                source: root.appIconSource()
                 fillMode: Image.PreserveAspectCrop
                 smooth: true
+
+                onStatusChanged: {
+                    if (status === Image.Error && !triedDesktopFallback) {
+                        triedDesktopFallback = true;
+                        source = root.resolveDesktopEntryIcon();
+                    }
+                }
             }
         }
     }
